@@ -1,0 +1,21 @@
+(1
+ (epoxide .
+          [(0 6 3)
+           ((timerfunctions (1 4 2))
+            (cogre (1 5))
+            (emacs (24 3)))
+           "A Modular Troubleshooting Framework for SDN (and other) Networks"
+           tar
+           ((:url . "https://github.com/nemethf/epoxide")
+            (:keywords))])
+ (cogre .
+        [(1 5)
+         ((emacs (24 3))) ; dependencies
+         "Cogre from CEDET git repository"
+         tar
+         ((:url . "http://cedet.sourceforge.net/cogre.shtml")
+          (:keywords))]))
+
+;; Local Variables:
+;; mode: emacs-lisp
+;; End:
