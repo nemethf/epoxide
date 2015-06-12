@@ -1,0 +1,8 @@
+view :: View(1, 2);
+ping0 :: Ping(localhost, yahoo.com);
+ping1 :: Ping(localhost, google.com);
+filter0 :: Filter(time=\([2-9][0-9]\|[1-9][0-9]\{2,\}\).*[0-9]* ms$);
+filter1 :: Filter(time=\([2-9][0-9]\|[1-9][0-9]\{2,\}\).*[0-9]* ms$);
+
+ping0 -> filter0 -> view;
+ping1 -> filter1 -> [1]view;

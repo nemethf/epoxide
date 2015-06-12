@@ -1,0 +1,11 @@
+clock :: Clock(1);
+ofctl-stat :: Flow-stat-ofctl(root@192.168.56.102, s1);
+pox-stat :: Flow-stat-pox(127.0.0.1, 00-00-00-00-00-02);
+filter-1 :: Flow-space-filter(l3_source=10.0.0.1->l3_destination=10.0.0.4);
+filter-2 :: Flow-space-filter(l3_source=10.0.0.1->l3_destination=10.0.0.4);
+dpids :: Dpids-pox(127.0.0.1);
+display :: Table-view;
+
+clock -> dpids;
+clock -> ofctl-stat -> filter-1 -> display;
+clock -> pox-stat -> filter-2[0] -> [1]display;
