@@ -19,6 +19,8 @@
 
 ;;; Code:
 
+(require 'epoxide)
+
 (eval-when-compile
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-outputs))
@@ -82,7 +84,6 @@
   "Kill connection buffer."
   (when (boundp 'epoxide-process)
     (epoxide-stop-process epoxide-process)))
-
 
 (provide 'ping)
 ;;; Ping.el ends here

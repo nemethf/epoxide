@@ -19,11 +19,16 @@
 
 ;;; Code:
 
+(require 'epoxide)
+
 (eval-when-compile
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-outputs))
 
 (defvar epoxide-process "Handle to traceroute backgroud process.")
+
+(defvar epoxide-traceroute-result nil
+  "Collect partial results of a trace.")
 
 (defun epoxide-traceroute-input-info ()
   "Provide documentation, value tips and validation for input fields."

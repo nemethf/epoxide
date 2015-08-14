@@ -106,7 +106,7 @@ BUF-LIST: list of buffers to show.")
   :type 'directory
   :group 'epoxide)
 
-(defcustom epoxide-start-tsg-on-file-open t
+(defcustom epoxide-start-tsg-on-file-open nil
   "When t, TSG is started without question when opening an .tsg file.
 Otherwise ask for confirmation before parsing the file."
   :type 'boolean
@@ -1146,7 +1146,7 @@ Values are saved to buffer local variable `epoxide-tsg-config-list'."
     (setq-local epoxide-tsg-config-list
 		(map 'list 'epoxide-chomp
 		     (split-string (buffer-substring-no-properties
-				    start-pos (1- (point))) ", " t))))
+				    start-pos (1- (point))) ",[ \f\t\n\r\v]+" t))))
   (epoxide-tsg-skip-whitespaces))
 
 (defun epoxide-tsg-expression-end-state ()
@@ -1384,12 +1384,12 @@ by this node's output buffer numbers.  This function should be
 called only after the node's input buffers are set otherwise
 links will not be connected properly."
   (let* (enabled-outputs)
+    (setq-local epoxide-tsg-prev-output-buffers
+		(mapcar (lambda (x)
+			  (epoxide-tsg-assign-name-to-output-buffer
+			   epoxide-tsg-node-name x))
+			epoxide-tsg-output-buffers))
     (when epoxide-tsg-node-class
-      (setq-local epoxide-tsg-prev-output-buffers
-		  (mapcar (lambda (x)
-			    (epoxide-tsg-assign-name-to-output-buffer
-			     epoxide-tsg-node-name x))
-			  epoxide-tsg-output-buffers))
       (let* ((fun-name (concat "epoxide-" (downcase epoxide-tsg-node-class)
                                "-output-info"))
              (def (funcall (intern-soft fun-name)))
