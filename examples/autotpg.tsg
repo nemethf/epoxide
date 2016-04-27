@@ -1,0 +1,11 @@
+// Scenario: simple scenario for demonstrating interaction with the
+// AutoTPG tool. (The scenario is illustrated in Unify'S D4.3
+// document.)
+
+// Query AutoTPG (switch 00:00:00:00:00:00:00:01) every minute,
+// extract 'error' from 'result' and display it in a view.
+Clock(60)
+-> Rest-api(localhost, 8080, /wm/autoTPG/qpc/json,
+            {"switch":"00:00:00:00:00:00:00:01","tableid":"0","method":"bin"})
+-> Json-filter(result)
+-> Json-filter(error) -> view;

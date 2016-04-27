@@ -1,6 +1,8 @@
 ;;; Ping.el --- EPOXIDE Ping node definition file
 
-;; Copyright (C) 2015 István Pelle, Tamás Lévai, Felicián Németh
+;; Copyright (C) 2015      Felicián Németh
+;; Copyright (C) 2015-2016 István Pelle
+;; Copyright (C) 2015      Tamás Lévai
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -84,6 +86,36 @@
   "Kill connection buffer."
   (when (boundp 'epoxide-process)
     (epoxide-stop-process epoxide-process)))
+
+(defun epoxide-ping-min-time (&rest operands)
+  "Return from OPERANDS the one having the lowest RTT."
+  (when operands
+    (epoxide-ping-compare-time '< 1.0e+INF operands)))
+
+(defun epoxide-ping-max-time (&rest operands)
+  "Return from OPERANDS the one having the highest RTT."
+  (when operands
+    (epoxide-ping-compare-time '> -1.0 operands)))
+
+(defun epoxide-ping-compare-time (operator init operands)
+  "Compare ping RTT times.
+
+Using OPERATOR and INIT, iterate trough OPERANDS and determine
+which to choose.  E.g. when OPERATOR is '<' and INIT is infinity,
+the ping message having the lowest RTT time is returned."
+  ;; FIXME: case of operands having multiple lines is not dealt with.
+  (let (ret current)
+    (dolist (o operands)
+      (when (and o
+		 (setq current (string-match "time=[0-9]+\\(\\.[0-9]+\\)*" o))
+		 (> current 0))
+	(setq current
+	      (string-to-number (car (split-string (substring o (+ 5 current))
+						   " " t "[ \f\t\n\r\v]+"))))
+	(when (apply operator (list current init))
+	  (setq init current)
+	  (setq ret o))))
+    ret))
 
 (provide 'ping)
 ;;; Ping.el ends here

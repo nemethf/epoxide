@@ -1,0 +1,3 @@
+// Assign "test buffer 1" and "test buffer 2" to a buffer node's
+// output and display them using a view.
+Emacs-buffer(test buffer 1, test buffer 2)[0, 1] -> [0, 1]v;

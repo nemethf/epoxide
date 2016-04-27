@@ -1,6 +1,6 @@
 ;;; Dpids-odl.el --- EPOXIDE DPIDs OpenDaylight node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -28,9 +28,9 @@
 ;;; Code:
 
 (require 'epoxide)
+(require 'url)     ; For accessing REST APIs.
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-previous-dpids)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-config-list)
@@ -55,28 +55,21 @@
 
 (defun epoxide-dpids-odl-init ()
   "Initialize variables."
-  (set (make-local-variable 'epoxide-input-marker) 1)
   (set (make-local-variable 'epoxide-previous-dpids) nil))
 
 (defun epoxide-dpids-odl-exec ()
   "Query an OpenDaylight controller for DPIDs."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(username (nth 1 epoxide-node-config-list))
-	(password (nth 2 epoxide-node-config-list))
-	(dpids-out (nth 0 epoxide-node-outputs))
-	(prev-dpids epoxide-previous-dpids)
-	enable dpids
-	dpids-to-remove dpids-to-add)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (username (nth 1 epoxide-node-config-list))
+	 (password (nth 2 epoxide-node-config-list))
+	 (dpids-out (nth 0 epoxide-node-outputs))
+	 (prev-dpids epoxide-previous-dpids)
+	 (enable (epoxide-node-enable-input-active
+	  	  (epoxide-node-read-inputs) clock))
+	 dpids dpids-to-remove dpids-to-add)
     (when (and clock host username password dpids-out)
-      ;; Check changes in the input buffer.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	(setq dpids (epoxide-dpids-odl-query host username password))
 	(when dpids
 	  ;; Notify the framework of the changes.
@@ -98,6 +91,7 @@
 
 Use USERNAME and PASSWORD for authentication.  Queried data is returned as a
 list."
+  (setq-local url-show-status nil)
   (let* ((url (concat "http://" host
 		      ":8080/controller/nb/v2/statistics/default/flow"))
 	 (url-request-method "GET")
@@ -106,7 +100,6 @@ list."
 					(base64-encode-string
 					 (concat username ":" password))))))
 	 (url-request-data)
-	 (url-show-status nil)
 	 (result-buffer (condition-case nil
 			    (url-retrieve-synchronously url)
 			(error nil)))

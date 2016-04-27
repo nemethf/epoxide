@@ -1,0 +1,12 @@
+iperf :: Iperf(192.168.123.4, 192.168.123.2, -u -i 1, -u -i 1) -> iperf-view :: View();
+iperf[1] -> [1]iperf-view;
+
+clock :: Clock(2);
+clock -> dump1 :: Flow-stat-ofctl(localhost, s1) -> ft :: Table-view(packet_count, dpid, nw_tos, actions) --> stat-view :: View();
+clock -> dump2 :: Flow-stat-ofctl(localhost, s2) -> [1]ft;
+clock -> dump4 :: Flow-stat-ofctl(localhost, s4) -> [2]ft;
+dump1 -> [1]stat-view;
+dump2 -> [2]stat-view;
+dump4 -> [3]stat-view;
+
+//gdb :: Gdb(localhost, click);

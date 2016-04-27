@@ -1,0 +1,40 @@
+// Use only one scenario at a given time, either scenario 1 or 2.
+
+// Scenario 1: simple example of querying the mean CPU utilization
+// from the RQE tool.
+
+// The RQE tool (running on localhost) is queried in every 10 seconds
+// for mean CPU usage and the result is displayed using a view.
+Clock(10) -> Rest-api(localhost, 8000, /query/cpu/?nfid=NF1&type=mean)
+-> Json-filter(meancpu) -> view;
+
+// // Uncomment the following lines to use the more complex example.
+// // Scenario 2: a more complex example of querying the mean CPU
+// // utilization from the RQE tool, where the query parameters can be
+// // modify by inserting lines containing new request parameters into
+// // certain Emacs buffers. (This scenario is illustrated in Unify's
+// // D4.3 document. For visibility reasons the single Emacs-buffer node
+// // is separated into three different ones on the figure.)
+
+// // Preconditions: Emacs has to have 3 open buffers named exactly
+// // 'resource', 'nfid', and 'type'.
+
+// // Collect data from Emacs buffers named 'resource', 'nfid' and 'type'
+// // and format them to create a valid string to query the RQE tool that
+// // runs on localhost.
+// buffers :: Emacs-buffer(resource, nfid, type)[0, 1, 2]
+// -> [0, 1, 2]Format(/query/%s/?nfid=%s&type=%s)
+// -> [-3]rqe :: Rest-api(localhost, 8000);
+
+// // Create a string for selecting the interesting part from the output
+// // of the RQE tool.
+// buffers[0] -> f :: Format(%s%s) -> [-1]result;
+
+// // Execute the query in every 10 seconds, use a Json-filter to select
+// // certain parts of the result and display it using a view.
+// Clock(10) -> rqe -> result :: Json-filter() -> view;
+
+// // If buffers 'resource', 'nfid' and 'type' are filled with the
+// // strings 'cpu', 'NF1' and 'mean' respectively then the query should
+// // perform the same task as in scenario 1. Changing these
+// // buffers' contents will result in a different query.

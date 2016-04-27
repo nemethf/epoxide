@@ -1,0 +1,8 @@
+// Scenario: use a DoubleDecker node to monitor messages.
+
+// Create a DoubleDecker node on the local machine and
+// subscribe to test1/all and test2/topics.
+dd :: Doubledecker(localhost,
+                   test1/all;test2/all)
+-> Json-filter(data);
+// Filter the data part of the messages.

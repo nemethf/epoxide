@@ -1,0 +1,101 @@
+// Scenario: use various nodes to test Internet connection in a home
+// network environment.
+
+// Use ping to check connectivity.
+pingg :: Ping(localhost, google.com, 35);
+pingi :: Ping(localhost, index.hu, 35);
+clock :: Clock(1);
+ping-decision :: Decision(nil, 5, or,
+                          line by line, same as input, string-match, 2, 1,
+			  icmp_seq,
+	                  line by line, same as input, string-match, 2, 1,
+			  icmp_seq);
+
+pingg -> ping-decision;
+pingi -> [1]ping-decision;
+clock -> [2]ping-decision;
+
+// Add view to observe ping behavior.
+// pingg -> view;
+// pingi -> [1]view;
+// ping-decision -> [2]view;
+// ping-decision[1] -> [3]view;
+// clock -> [4]view;
+
+
+// Run ifconfig to check interface configuration when pings failed.
+ifconfig :: Ifconfig(localhost);
+ifconfig-decision :: Decision(nil, nil, or,
+                              nil, nil,
+			      epoxide-ifconfig-check-interfaces, 1, 1, lo);
+
+ping-decision[1] -> ifconfig;
+ifconfig -> ifconfig-decision;
+
+// Add view to observe ifconfig behavior.
+// ifconfig -> view2;
+// ifconfig-decision -> [1]view2;
+// ifconfig-decision[1] -> [2]view2;
+
+
+// Perform DNS lookup when interface configuration seems to be OK.
+ifconfig-decision -> host :: Host(localhost, google.com);
+host -> host-decision :: Decision(nil, nil, or,
+                                  nil, same as input, epoxide-host-check, 1, 0);
+
+// Add view to observe host behavior.
+// host -> view3;
+// host-decision[0, 1] -> [1, 2]view3;
+
+
+// If everything is alright locally, check what is the last hop until
+// which traffic can be routed.
+host-decision -> trace :: Traceroute(localhost, google.com);
+trace-decision :: Decision(nil, nil, or,
+                           nil, t, string-match, 2, 1, Success);
+
+trace[1] -> trace-decision;
+
+// Add view to observe host behavior.
+// trace -> view4;
+// trace-decision[0, 1, 2] -> [1, 2, 3]view4;
+
+
+// Check whether ARP cache has entries. Check only those interfaces
+// that have been returned by ifconfig-decision node.
+ifconfig-decision -> f :: Function((lambda (x)
+                                     (let (interfaces)
+                                       (dolist (i (split-string x "\n\n" t))
+                                         (push (car (split-string i " "))
+				               interfaces))
+                                       (mapconcat 'identity
+				                  (nreverse interfaces)
+				                  ";"))), 'input-0)[0, 0]
+-> [0, -2]arp :: Arp(localhost)
+-> arp-decision :: Decision(nil, 1, or,
+                            nil, same as input, (lambda (x)
+                                                  (> (length x) 0)), 1, 0);
+ifconfig-decision -> [1]arp-decision;
+
+// Add view to observe arp behavior.
+// clock -> view5;
+// ifconfig-decision -> [1]view5;
+// f -> [2]view5;
+// arp -> [3]view5;
+// arp-decision[2] -> [4]view5;
+
+
+// Add a view to summarize decisions.
+// ping-decision[2] -> summary-view;
+// ifconfig-decision[2] -> [1]summary-view;
+// host-decision[2] -> [2]summary-view;
+// trace-decision[2] -> [3]summary-view;
+// arp-decision[2] -> [4]summary-view;
+
+// Add decision summary node.
+ds :: Decision-summary() --> dsview :: View();
+ping-decision[2] -> ds;
+ifconfig-decision[2] -> [1]ds;
+arp-decision[2] -> [2]ds;
+host-decision[2] -> [3]ds;
+trace-decision[2] -> [4]ds;

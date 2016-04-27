@@ -1,0 +1,13 @@
+view :: View(1, 2);
+pingg :: Ping(localhost, google.com);
+pingy :: Ping(localhost, yahoo.com);
+pingi :: Ping(localhost, index.hu);
+d :: Decision(t, nil,
+              epoxide-ping-min-time,
+	      line by line, same as input, identity, 1, 0,
+	      line by line, same as input, identity, 1, 0,
+	      line by line, same as input, identity, 1, 0);
+
+pingg -> d -> view;
+pingy -> [1]d[1] -> [1]view;
+pingi -> [2]d;

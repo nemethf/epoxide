@@ -1,0 +1,12 @@
+view :: View();
+pingg :: Ping(localhost, google.com);
+pingy :: Ping(localhost, yahoo.com);
+pingi :: Ping(localhost, index.hu);
+d :: Decision(nil, nil, or,
+              line by line, same as input, string-match, 2, 1, bud,
+	      line by line, same as input, string-match, 2, 1, yahoo,
+	      line by line, same as input, string-match, 2, 1, index.hu);
+
+pingg -> d -> view;
+pingy -> [1]d[1] -> [1]view;
+pingi -> [2]d[2] -> [2]view;

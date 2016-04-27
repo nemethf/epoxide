@@ -1,0 +1,130 @@
+// Scenario: use various nodes to test the emulated network appearing
+// in the troubleshooting laboratory tasks.
+
+// Use ping to check connectivity.
+ping-s1 :: Ping(localhost, 125.0.1.254, 15);
+ping-s2 :: Ping(localhost, 125.0.1.253, 15);
+clock :: Clock(1);
+ping-decision :: Decision(nil, 5, or,
+                          line by line, same as input, string-match, 2, 1,
+			  ttl,
+	                  line by line, same as input, string-match, 2, 1,
+			  ttl);
+
+ping-s1 -> ping-decision;
+ping-s2 -> [1]ping-decision;
+clock -> [2]ping-decision;
+
+// Add view to observe ping behavior.
+// ping-s1 -> ping-view;
+// ping-s2 -> [1ping-]view;
+// ping-decision -> [2ping-]view;
+// ping-decision[1] -> [3]ping-view;
+// clock -> [4]ping-view;
+
+
+// Run ifconfig to check interface configuration when pings failed.
+ifconfig :: Ifconfig(localhost);
+ifc-decision :: Decision(nil, nil, or,
+                              nil, nil,
+			      epoxide-ifconfig-check-interfaces, 1, 2, lo, h1-eth1);
+
+ping-decision[1] -> ifconfig;
+ifconfig -> ifc-decision;
+
+// Add view to observe ifconfig behavior.
+// ifconfig -> ifc-view;
+// ifc-decision -> [1]ifc-view2;
+// ifc-decision[1] -> [2]ifc-view2;
+
+
+// Perform DNS lookup when interface configuration seems to be OK.
+ifc-decision -> host :: Host(localhost, s1.tslab);
+host -> host-decision :: Decision(nil, nil, or,
+                                  nil, same as input, epoxide-host-check, 1, 0);
+
+// Add view to observe host behavior.
+// host -> host-view;
+// host-decision[0, 1] -> [1, 2]host-view;
+
+
+// Check whether ARP cache has entries. Check only those interfaces
+// that have been returned by ifc-decision node.
+ifc-decision -> f-1 :: Function((lambda (x)
+                                   (let (interfaces)
+                                     (dolist (i (split-string x "\n\n" t))
+                                       (push (car (split-string i " "))
+    		 		             interfaces))
+                                     (mapconcat 'identity
+		 		                (nreverse interfaces)
+		 		                ";"))), 'input-0)[0, 0]
+-> [0, -2]arp :: Arp(localhost, nil, -n)
+-> arp-decision :: Decision(nil, 1, or,
+                            nil, same as input, (lambda (x)
+                                                  (> (length x) 0)), 1, 0);
+ifc-decision -> [1]arp-decision;
+
+// Add view to observe arp behavior.
+// clock -> arp-view;
+// ifc-decision -> [1]arp-view;
+// f-1 -> [2]arp-view;
+// arp -> [3]arp-view;
+// arp-decision[2] -> [4]arp-view;
+
+
+// If everything is alright locally, check what is the last hop until
+// which traffic can be routed.
+arp-decision -> trace :: Traceroute(localhost, 125.0.1.254, -n);
+trace-decision :: Decision(nil, nil, or,
+                           nil, t, string-match, 2, 1, Success);
+
+trace[1] -> trace-decision;
+
+// Add view to observe traceroute behavior.
+// trace -> trace-view;
+// trace-decision[0, 1, 2] -> [1, 2, 3]trace-view;
+
+
+// Check routes on the last hop returned by the Traceroute node when
+// the traceroute was unsuccessful.
+trace[1] -> f-2 :: Function((lambda (x)
+                              (cadr (split-string x ": "))), 'input-0)[0, 0]
+-> [0, -1]route :: Route(nil, 125.0.1.253;125.0.1.254, -n)
+-> route-decision :: Decision(nil, nil, or,
+                              nil, same as input, (lambda (x)
+			   	     	       	    (> (length x) 0)), 1, 0);
+
+// Add view to observe route behavior.
+// route -> route-view;
+// f-2 -> [1]route-view;
+// route-decision[0, 1, 2] -> [2, 3, 4]route-view;
+
+
+// Check firewall rules (with iptables) on the last hop returned by
+// the Traceroute node when the traceroute was unsuccessful.
+f-2 -> [-1]iptables :: Iptables(nil, 125.0.1.254;125.0.1.253);
+route-decision[0] -> iptables;
+
+// Add view to observe iptables behavior.
+// f-2 -> iptables-view;
+// route-decision -> [1]iptables-view;
+
+// Add a view to summarize decisions.
+// ping-decision[2] -> summary-view;
+// ifc-decision[2] -> [1]summary-view;
+// host-decision[2] -> [2]summary-view;
+// trace-decision[2] -> [3]summary-view;
+// route-decision[2] -> [4]summary-view;
+// iptables-decision -> [5]summary-view;
+// arp-decision[2] -> [?]summary-view;
+
+
+// Add decision summary node.
+ds :: Decision-summary() --> view :: View();
+ping-decision[2] -> ds;
+ifc-decision[2] -> [1]ds;
+host-decision[2] -> [2]ds;
+arp-decision[2] -> [3]ds;
+trace-decision[2] -> [4]ds;
+route-decision[2] -> [5]ds;
+iptables -> [1]view;

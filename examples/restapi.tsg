@@ -1,0 +1,36 @@
+// Demonstrate Rest-api node, Function node and dynamic node
+// configuration argument capabilities.
+
+// Query switches from a POX controller.
+c :: Clock(1)
+-> r1 :: Rest-api(127.0.0.1, 8000, /OF/, {"method":"get_switches","id":"0"})
+-> v;
+
+// Extract DPID from the message (it is going to be a JSON list of
+// DPIDs.)
+r1 -> filter :: Json-filter(dpid) -> [1]v;
+
+// Select a single DPID, each time a different one from the list.
+filter[0, 0]
+-> [0, -2]select-dpid
+   :: Function((lambda (x)
+	     	 (let* ((json (json-read-from-string x))
+		        (len (length json))
+			 ret)
+		   (unless (and (boundp 'epoxide-restapi.tsg-counter)
+				(< epoxide-restapi.tsg-counter len))
+		     (setq epoxide-restapi.tsg-counter 0))
+		   (setq ret (aref json epoxide-restapi.tsg-counter))
+		   (incf epoxide-restapi.tsg-counter)
+		   ret)))
+-> [2]v;
+
+// Create a new JSON flow stat query message using the selected DPID.
+select-dpid
+-> format :: Format({"method":"get_flow_stats","params":{"dpid":"%s"},"id":"0"})
+-> [3]v;
+
+// Supply the new JSON query message to a new REST API query. r3's
+// input #0 needs to be connected in order to receive enabling
+// ("clock").
+format[0, 0] -> [0, -4]r2 :: Rest-api(127.0.0.1, 8000, /OF/) -> [4]v;

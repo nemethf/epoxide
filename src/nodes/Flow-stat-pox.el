@@ -1,6 +1,6 @@
 ;;; Flow-stat-pox.el --- EPOXIDE Flow stat POX node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -29,9 +29,9 @@
 ;;; Code:
 
 (require 'epoxide)
+(require 'url)     ; For accessing REST APIs.
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-outputs)
   (defvar epoxide-node-inputs))
@@ -67,26 +67,21 @@
   '(((doc-string . "flow stats of a datapath"))))
 
 (defun epoxide-flow-stat-pox-init ()
-  "Initialize node's input marker."
-  (set (make-local-variable 'epoxide-input-marker) 1))
+  "Perform node initialization."
+  nil)
 
 (defun epoxide-flow-stat-pox-exec ()
   "Query a POX controller for the flow stats of a specified DPID."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(dpid (nth 1 epoxide-node-config-list))
-	(flow-stat-out (nth 0 epoxide-node-outputs))
-	(i 0)
-	enable json result)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (dpid (nth 1 epoxide-node-config-list))
+	 (flow-stat-out (nth 0 epoxide-node-outputs))
+	 (i 0)
+	 (enable (epoxide-node-enable-input-active
+		  (epoxide-node-read-inputs) clock))
+	 json result)
     (when (and clock host dpid flow-stat-out)
-      ;; Check clock.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	(setq json (epoxide-flow-stat-pox--query-flow-stats dpid host))
 	;; Rename parameters to have standard names.
 	(with-temp-buffer
@@ -116,6 +111,7 @@
 Create a JSON message, then use it in an HTTP POST request.
 DPID: datapath ID of the requested switch.
 HOST: IP address of the host where POX is running at."
+  (setq-local url-show-status nil)
   (let* ((json-message (json-encode
 			(reverse (json-add-to-object
 				  (reverse
@@ -129,7 +125,6 @@ HOST: IP address of the host where POX is running at."
 	 (url-request-method "POST")
 	 (url-request-extra-headers)
 	 (url-request-data json-message)
-	 (url-show-status nil)
 	 (result-buffer (url-retrieve-synchronously url))
 	 json)
     (with-current-buffer result-buffer

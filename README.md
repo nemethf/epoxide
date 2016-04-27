@@ -344,6 +344,20 @@ Lisp files and their names should start with a capital letter
 
 As an example take a look at the [Ping node](src/nodes/Ping.el).
 
+# Node recommenders
+
+Epoxide offers the ability to create node recommenders in order to
+help setting up TSGs. The `epoxide-recommender` customization group
+contains variables to set the recommender type and the display
+method. Epoxide can be extended with third party recommenders and
+display methods by studying the `Node recommender` section in
+`epoxide.el`.
+
+# Node documentation
+
+Documentation for each of the currently implemented nodes can be found
+[here](NODES.md).
+
 # Keyboard shortcuts
 
 We present the full extent of the specific Epoxide key bindings here.
@@ -377,6 +391,7 @@ Navigation, views, etc:
 - <kbd>C-[1-9] M-g v</kbd> activates View #[1-9],
 - <kbd>M-N</kbd> activates the next View,
 - <kbd>M-P</kbd> activates the previous View.
+- <kbd>C-c C-r</kbd> recommends nodes.
 
 # Acknowledgement
 

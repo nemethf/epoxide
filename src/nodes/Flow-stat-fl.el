@@ -1,6 +1,6 @@
 ;;; Flow-stat-fl.el -- EPOXIDE Flow stat Floodlight node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -32,9 +32,9 @@
 ;;; Code:
 
 (require 'epoxide)
+(require 'url)     ; For accessing REST APIs.
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-outputs)
@@ -84,28 +84,23 @@
   '(((doc-string . "flow stats of a datapath"))))
 
 (defun epoxide-flow-stat-fl-init ()
-  "Initialize node's input marker."
-  (set (make-local-variable 'epoxide-input-marker) 1))
+  "Dummy function."
+  nil)
 
 (defun epoxide-flow-stat-fl-exec ()
   "Query a Floodlight controller for the flow stats of a specified DPID."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(dpid (nth 1 epoxide-node-config-list))
-	(stat-type (if (nth 2 epoxide-node-config-list)
-		       (nth 2 epoxide-node-config-list)
-		     "flow"))
-	(flow-stat-out (nth 0 epoxide-node-outputs))
-	enable json result)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (dpid (nth 1 epoxide-node-config-list))
+	 (stat-type (if (nth 2 epoxide-node-config-list)
+			(nth 2 epoxide-node-config-list)
+		      "flow"))
+	 (flow-stat-out (nth 0 epoxide-node-outputs))
+	 (enable (epoxide-node-enable-input-active
+		  (epoxide-node-read-inputs) clock))
+	 json result)
     (when (and clock host dpid flow-stat-out)
-      ;; Check clock.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	;; Rename parameters to have standard names.
 	(with-temp-buffer
 	  (epoxide-fl-json-insert-flowstat
@@ -129,13 +124,13 @@
 DPID is the datapath ID DPID of the switch to be queried.
 HOST ip address of the host where the Floodlight controller is running at.
 STAT-TYPE is the stat type to be queried."
+  (setq-local url-show-status nil)
   (let* ((url (concat "http://" host
 		      ":8080/wm/core/switch/" dpid "/"
 		      stat-type "/json"))
 	 (url-request-method "GET")
 	 (url-request-extra-headers)
 	 (url-request-data nil)
-	 (url-show-status nil)
 	 (result-buffer (condition-case nil
 			    (url-retrieve-synchronously url)
 			  (error nil)))

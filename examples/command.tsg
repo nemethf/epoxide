@@ -1,0 +1,8 @@
+// Scenario: demonstrate Command node.
+
+// Call 'echo' on a one second basis.
+Clock(1) -> Command(localhost, echo, test string 1: should update each second)
+-> view;
+
+// Call 'echo' only once.
+Command(localhost, echo, test string 2: should appear only once) -> [1]view;

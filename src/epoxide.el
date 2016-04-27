@@ -1,8 +1,8 @@
 ;;; epoxide.el --- Emacs POX IDE
 
 ;; Copyright (C) 2013-2015 András Gulyás
-;; Copyright (C) 2013-2015 Felicián Németh
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2013-2016 Felicián Németh
+;; Copyright (C) 2014-2016 István Pelle
 ;; Copyright (C) 2015      Tamás Lévai
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -44,6 +44,40 @@
     ;; Can't use backquote here, it's too early in the bootstrap.
     (list 'set (list 'make-local-variable (list 'quote var)) val)))
 
+;; For Emacs versions in which `split-string' has only 3 arguments.
+(when (< (length
+	  (delete '&optional
+		  (copy-sequence (help-function-arglist 'split-string)))) 4)
+  (defadvice split-string (after nf (string &optional sep omit trim) activate)
+    "If TRIM is non-nil, it should be a regular expression to match
+text to trim from the beginning and end of each substring.  If trimming
+makes the substring empty, it is treated as null."
+    (when trim
+      (setq ad-return-value
+	    (mapcar (lambda (str)
+		      (when (string-match trim str)
+			(setq str (substring str (match-end 0))))
+		      (when (string-match trim str)
+			(setq str (substring str 0 (match-beginning 0))))
+		      str)
+		    ad-return-value)))))
+
+;; For Emacs versions that do not have `special-form-p'.
+(unless (fboundp 'special-form-p)
+  (defun special-form-p (object)
+    "Non-nil if and only if OBJECT is a special form.
+
+Compatibility code for Emacs versions prior to contain
+`special-form-p'. Use the list of special forms from the
+documentation of the function for Emacs 24.5.1 for comparison."
+    (when (member object
+		  '(and catch cond codition-case defconst defvar
+			function if interactive lambda let let* or prog1
+			prog2 progn quote save-current-buffer save-excursion
+			save-restriction setq setq-default track-mouse
+			unwind-protect while))
+      t)))
+
 ;;; Variables:
 
 (defvar epoxide-root-buffer nil
@@ -56,6 +90,7 @@
 (defvar epoxide-node-class)
 (defvar epoxide-node-inputs)
 (defvar epoxide-node-config-list)
+(defvar epoxide-node-dynamic-config-list)
 (defvar epoxide-node-outputs)
 (defvar epoxide-init-function nil)
 (defvar epoxide-exec-function nil)
@@ -84,6 +119,7 @@ BUF-LIST: list of buffers to show.")
   "List containing buffer names representing events.")
 (defvar epoxide-event-timer nil
   "Idle Timer used to schedule tasks of epoxide nodes.")
+(defvar epoxide-event--processing-flag nil)
 (defvar epoxide-tsg-visualizer-file nil
   "Filename for easy COGRE loading.")
 (defvar epoxide-variable)
@@ -92,6 +128,18 @@ BUF-LIST: list of buffers to show.")
 (defvar epoxide-nodes)
 (defvar epoxide-tsg-visualizer-new-layout-requested-p)
 (defvar ac-candidate-face)
+(defvar epoxide-initial-window-config)
+(defvar epoxide-input-markers)
+(defvar ibuffer-filter-groups) ;; from ibuf-ext.el
+
+(defcustom epoxide-tramp-verbose-level tramp-verbose
+  "Controls TRAMP logging level when Epoxide runs.
+
+In order to silence TRAMP connection messages set this less or
+equal to 2 (but at least 0).  See the documentation of varibale
+`tramp-verbose' for more details."
+  :type 'number
+  :group 'epoxide)
 
 
 ;; --------------    Parsing an .tsg file    -----------------------------------
@@ -106,17 +154,34 @@ BUF-LIST: list of buffers to show.")
   :type 'directory
   :group 'epoxide)
 
-(defcustom epoxide-start-tsg-on-file-open nil
-  "When t, TSG is started without question when opening an .tsg file.
-Otherwise ask for confirmation before parsing the file."
-  :type 'boolean
+(defcustom epoxide-start-tsg-on-file-open 'ask-before-starting
+  "Controls what happens when a .tsg file is opened.
+
+`start-tsg' : start TSG when opening a .tsg file without any
+question.
+
+`ask-before-starting' : ask for confirmation before parsing the
+.tsg file.
+
+`open-file-without-parsing': open .tsg file but do not parse it (a
+message will be displayed that tells how to start the TSG)."
+  :type '(radio
+	  (const start-tsg)
+	  (const ask-before-starting)
+	  (const open-file-without-parsing))
+  :group 'epoxide)
+
+(defcustom epoxide-default-view-name "view"
+  "This view is used as default when no other views are created."
+  :type 'string
   :group 'epoxide)
 
 (defvar epoxide-tsg-root-buffer nil
   "Temporarily contains the buffer name of the corresponding .tsg file.")
 
 ;; Structure to handle nodes.
-(cl-defstruct node name class config-list input-buffers output-buffers)
+(cl-defstruct node name class config-list dynamic-config-list input-buffers
+	      output-buffers)
 
 ;; Structure to handle views.
 (cl-defstruct view name cols rows input-buffers)
@@ -141,7 +206,9 @@ Otherwise ask for confirmation before parsing the file."
     (define-key map (kbd "M-g v") 'epoxide-view-show)
     (define-key map (kbd "M-P") 'epoxide-view-show-prev)
     (define-key map (kbd "M-N") 'epoxide-view-show-next)
-    (define-key map (kbd "C-c C-r") 'epoxide-restart-node)
+    (define-key map (kbd "C-c R") 'epoxide-restart-node)
+    (define-key map (kbd "C-c C-k") 'epoxide-tsg-kill-all)
+    (define-key map (kbd "M-g V") 'epoxide-view-show-views)
     map)
   "Keymap for `epoxide-mode'.")
 
@@ -180,10 +247,10 @@ kill the process."
       (condition-case nil
 	  (progn
 	    (stop-process process)
-	    (while (or (member (process-status process) '(exit stop signal))
-                       (< wait 0))
-              (sleep-for 0.01)
-              (decf wait))
+	    (while (and (> wait 0)
+			(member (process-status process) '(exit stop signal)))
+		(sleep-for 0.01)
+		(decf wait))
             (unless (member (process-status process) '(exit stop signal))
               (interrupt-process process t)
               (sleep-for 0.01))
@@ -225,14 +292,62 @@ while incrementing NUM starting from 0.  Then evaluate RESULT to
 get return value, default nil.
 
 \(fn (NUM VAR LIST [RESULT]) BODY...)"
-  (declare (indent 1) (debug ((symbolp form &optional form) body)))
+  (declare (indent 1)
+           (debug ((symbolp symbolp form &optional form) &rest form)))
   `(let ((,(car spec) 0))
      (dolist (,(nth 1 spec) ,(nth 2 spec) ,(nth 3 spec))
       ,@body
       (incf ,(car spec)))))
-
-;;; Code:
 
+(defun epoxide-display-buffers (buffers &optional delete-other-windows)
+  "Display BUFFERS.
+
+BUFFERS is a list of buffers that are to be displayed.  Display
+each of them by creating an automatic layout that splits the
+window by taking into consideration the current frame and window
+sizes.  When optional second argument DELETE-OTHER-WINDOWS is
+non-nil all other windows are closed when displaying BUFFERS."
+  (when delete-other-windows
+    (delete-other-windows))
+  (when buffers
+    (switch-to-buffer (car buffers))
+    (setq buffers (cdr buffers)))
+  (let ((scale-factor (/ (frame-char-height) (frame-char-width))))
+    (dolist (buffer buffers)
+      (let* ((largest-window (get-largest-window))
+	     (largest-height (window-height largest-window))
+	     (largest-width (window-width largest-window))
+	     ;; Split window vertically when its relative height is
+	     ;; smaller than its relative width.
+	     (vertical-split (if (< (* scale-factor largest-height)
+				    largest-width)
+				 t
+			       nil))
+	     (window (condition-case nil
+			 (split-window (get-largest-window) nil vertical-split)
+		       (error nil))))
+	(when (null window)
+	  (epoxide-log
+	   "Some buffers are not displayed due to too small frame size.")
+	  (return))
+	(set-window-buffer window buffer)))
+    (balance-windows)))
+
+(defun epoxide-add-to-list (n item list)
+  "Add an item to a list.
+
+N specifies the 1 based index where ITEM should be placed in
+LIST.  If the Nth position is occupied, shift the cdr of LIST.  If
+N is greater than the length of LIST, fill in the gap with nils."
+  (when (> n 0)
+    (if (> n (length list))
+	(epoxide-setl list (1- n) item)
+      (setq n (1- n))
+      (let ((head (butlast (copy-sequence list) (- (length list) n)))
+	    (tail (nthcdr n (copy-sequence list))))
+	(append (nreverse (cons item (nreverse head))) tail)))))
+
+
 (define-derived-mode epoxide-mode fundamental-mode
   "Key definitions:
 \\{epoxide-mode-map}"
@@ -305,7 +420,10 @@ get return value, default nil.
     (define-key map (kbd "M-g v") 'epoxide-view-show)
     (define-key map (kbd "M-P") 'epoxide-view-show-prev)
     (define-key map (kbd "M-N") 'epoxide-view-show-next)
-    (define-key map (kbd "C-c C-r") 'epoxide-restart-node)
+    (define-key map (kbd "C-c R") 'epoxide-restart-node)
+    (define-key map (kbd "C-c C-k") 'epoxide-tsg-kill-all)
+    (define-key map (kbd "M-g V") 'epoxide-view-show-views)
+    (define-key map (kbd "C-c C-r") 'epoxide-recommender-recommend)
     map)
   "Keymap for `epoxide-tsg-mode'.")
 
@@ -331,7 +449,8 @@ Key definitions:
 		epoxide-tsg-input-buffers epoxide-tsg-output-buffers
 		epoxide-tsg-prev-output-buffers epoxide-tsg-config-list
 		epoxide-tsg-node-list epoxide-dpids epoxide-switch-names
-		epoxide-view-list epoxide-tsg-eldoc-documentations))
+		epoxide-view-list epoxide-tsg-eldoc-documentations
+		epoxide-initial-window-config))
         (dir (concat temporary-file-directory "epoxide.tsg/")))
     (make-directory dir t)
     (setq-local epoxide-tsg-visualizer-file (concat dir (buffer-name) ".cgr"))
@@ -352,6 +471,7 @@ Key definitions:
   (epoxide-ac-init)                     ; Initialize autocomplete.
   (epoxide-tsg-eldoc-init)              ; Initialize eldoc for epoxide-tsg-mode.
   (font-lock-fontify-buffer)
+  (setq-local epoxide-initial-window-config (current-window-configuration))
   (epoxide-tsg-clear-and-start))
 
 (defvar epoxide-topology-mode-syntax-table
@@ -433,7 +553,8 @@ It can be one of the following values.
 The part after the first '.' character is stripped."
   (if (member file-name  '("." ".."))
       nil
-    (if (string-match "#" file-name)
+    (if (or (string-match "#" file-name)
+	    (string-match "~" file-name))
 	(setq file-name nil)
       (setq file-name (substring file-name 0 (string-match "\\." file-name))))
     file-name))
@@ -468,9 +589,13 @@ While being in the config list, highlight the current config parameter."
 	    (when (search-backward p pos t)
 	      (forward-char (length p))
 	      (setq pos (point))))
+	  ;; If a commented line got read, remove it from the expression.
 	  (setq expression
 		(replace-regexp-in-string
-		 "\n" " " (buffer-substring-no-properties pos c-pos)))
+		 "//.*[\n]+" "" (buffer-substring-no-properties pos c-pos)))
+	  (setq expression
+		(replace-regexp-in-string
+		 "\n" " " expression))
 	  (goto-char pos)
 	  (epoxide-tsg-skip-whitespaces)
 	  ;; When input links are presumed to be coming.
@@ -551,7 +676,7 @@ eldoc documentation of the node."
        doc
        (epoxide-tsg-eldoc-highlight-current-argument
 	(number-to-string
-	 (1- (length (split-string expression ", ")))) data class)))
+	 (1- (length (split-string expression ", ")))) data class 1)))
     (unless doc
       (setq doc (concat class " has no documented configuration parameters")))
     doc))
@@ -585,11 +710,21 @@ eldoc documentation of the node."
       (setq doc (concat class " has no documented outputs")))
     doc))
 
-(defun epoxide-tsg-eldoc-highlight-current-argument (num data name-or-class)
+(defun epoxide-tsg-eldoc-highlight-current-argument (num data name-or-class
+							 &optional offset)
   "Return hint text where NUMth part of eldoc DATA is highlighted.
 If the NUMth parameter is not documented no highlight is
 given.  To make the hint more descriptive node information is also
-included by using the node's NAME-OR-CLASS."
+included by using the node's NAME-OR-CLASS.
+
+When optional fourth argument OFFSET is present add offset to num
+and use that as an index to find the argument to be
+highlighted (it is needed as configuration arguments are indexed
+from 1 as opposed from 0)."
+  (when offset
+    (setq num (string-to-number num))
+    (setq num (number-to-string
+  	       (incf num offset))))
   (let ((beg "")
 	(highlight "")
 	(rest "")
@@ -600,7 +735,7 @@ included by using the node's NAME-OR-CLASS."
 	(setq doc (concat name-or-class " " data))
       (setq beg (substring data 0 (string-match num data)))
       (setq highlight (substring data (string-match num data)))
-      (when (setq pos (string-match ";" highlight))
+      (when (setq pos (string-match "; " highlight))
 	(setq rest (substring highlight pos))
 	(setq highlight (substring highlight 0 pos)))
       (setq doc (concat name-or-class " " beg
@@ -709,7 +844,7 @@ NODE-NAME, otherwise with NODE-CLASS."
 				     inputs))))
 	(config (when configs
 		  (concat "config: "
-			  (epoxide-tsg-eldoc-list-parameters configs t))))
+			  (epoxide-tsg-eldoc-list-parameters configs t 1))))
 	(output (when outputs
 		  (concat "outputs: "
 			  (epoxide-tsg-eldoc-list-parameters outputs)))))
@@ -719,24 +854,31 @@ NODE-NAME, otherwise with NODE-CLASS."
 			       (delq nil (list identifier input config output))
 			       "\n")))))
 
-(defun epoxide-tsg-eldoc-list-parameters (parameters &optional first-line)
+(defun epoxide-tsg-eldoc-list-parameters (parameters &optional first-line
+						     offset)
   "Concatenate PARAMETERS into a string.
 
 Use just the first lines if FIRST-LINE is not nil.
 
 Format:
-0: parameter #0; parameter #1; parameter #2; etc."
+0: parameter #0; parameter #1; parameter #2; etc.
+
+When OFFSET is present add offset to the index before converting
+it to a string (e.g. configuation arguments should start with
+index 1 instead of 0)."
   (let ((i -1))
     (mapconcat (lambda (p)
                  (setq i (1+ i))
                  (when first-line
                    (string-match "^\\(.*\\)$" p)
                    (setq p (match-string 1 p)))
-                 (concat (number-to-string i) ": " p))
+                 (concat (number-to-string (if offset
+					       (+ i offset)
+					     i)) ": " p))
                parameters "; ")))
 
 
-;; --------------    Parsing an .tsg file    -----------------------------------
+;; --------------    Parsing a .tsg file    -----------------------------------
 
 (defun epoxide-tsg-clear-and-start ()
   "Decide whether to ask for confirmation before clearing this epoxide session.
@@ -747,9 +889,13 @@ otherwise ask for confirmation."
   (if (and (epoxide-event-running-p) epoxide-tsg-node-list)
       (when (y-or-n-p "Clear current epoxide session and restart? ")
 	(epoxide-tsg-clear-and-start-helper))
-    (when (or epoxide-start-tsg-on-file-open
-	      (y-or-n-p "Start TSG? "))
-      (epoxide-tsg-clear-and-start-helper))))
+    (if (or (equal (point-max) 1)
+	    (eq epoxide-start-tsg-on-file-open 'open-file-without-parsing))
+	(message "You can start this TSG with C-x C-e")
+    (unless (eq epoxide-start-tsg-on-file-open 'open-file-without-parsing)
+      (when (or (eq epoxide-start-tsg-on-file-open 'start-tsg)
+		(y-or-n-p "Start TSG? "))
+	(epoxide-tsg-clear-and-start-helper))))))
 
 (defun epoxide-tsg-clear-and-start-helper ()
   "Clear states belonging to this session then restart execution.
@@ -791,9 +937,7 @@ node's config has changed."
 						  (node-class node)))))))
     ;; Add nodes to framework, and schedule them.
     (epoxide-tsg-execute-tsg)
-    (if epoxide-view-list
-	(epoxide-view-show epoxide-view-last-index)
-      (epoxide-show-aftereval-view epoxide-tsg-root-buffer))))
+    (epoxide-view-show epoxide-view-last-index)))
 
 (defun epoxide-tsg-execute-tsg ()
   "Start execution of TSG defined in the current buffer.
@@ -865,7 +1009,11 @@ exist if IGNORE-OPEN-BUFFERS is non-nil."
 	(dolist (output (node-output-buffers node))
 	  ;; Set mode of the output buffers and
 	  ;; set root-buffer of the outputs to their node buffers.
-	  (epoxide-tsg-set-output output root-buffer node-buffer))))))
+	  (epoxide-tsg-set-output output root-buffer node-buffer))
+	(with-current-buffer node-buffer
+	  ;; Call init function after output buffer have been initialized.
+	  ;; Init function has to overwrite initial buffer content if needed.
+	  (funcall epoxide-init-function))))))
 
 (defun epoxide-tsg-set-node-functions (node)
   "Load init, exec and stop functions of the NODE source.
@@ -886,9 +1034,7 @@ Store functions in buffer local variables."
       (autoload init (node-class node))
       (setq-local epoxide-init-function init)
       ;; Add initial content to node's buffer.
-      (epoxide-tsg-init-node-buffer)
-      ;; Init function has to overwrite initial buffer content if needed.
-      (funcall epoxide-init-function))))
+      (epoxide-tsg-init-node-buffer))))
 
 (defun epoxide-tsg-set-output (output root-buffer src-node)
   "Initialize an output buffer.
@@ -908,6 +1054,7 @@ Buffer NODE is part of a TSG defined in ROOT-BUFFER."
   (setq-local epoxide-node-class (node-class node))
   (setq-local epoxide-node-inputs (node-input-buffers node))
   (setq-local epoxide-node-config-list (node-config-list node))
+  (setq-local epoxide-node-dynamic-config-list (node-dynamic-config-list node))
   (setq-local epoxide-node-outputs (node-output-buffers node))
   (setq-local epoxide-root-buffer root-buffer))
 
@@ -927,9 +1074,23 @@ source file location and `epoxide-mode's available key bindings."
 
 Inforamtion contains: node name, class, configuration list and
 source file location."
-  (insert "NODE NAME: " epoxide-node-name "\nNODE CLASS: " epoxide-node-class
-	  "\nCONFIGURATION LIST: " (format "%s" epoxide-node-config-list)
-	  "\nSOURCE FILE: ")
+  (let ((max-length (if (> (length epoxide-node-config-list)
+			     (length epoxide-node-dynamic-config-list))
+			  (length epoxide-node-config-list)
+			(length epoxide-node-dynamic-config-list)))
+	  (i 0)
+	  config)
+      (while (< i max-length)
+	(if (null (nth i epoxide-node-dynamic-config-list))
+	    (push (nth i epoxide-node-config-list) config)
+	  (push (concat "dynamic:"
+			(nth i epoxide-node-dynamic-config-list))
+		config))
+	(incf i))
+      (insert "NODE NAME: " epoxide-node-name "\nNODE CLASS: "
+	      epoxide-node-class
+	      "\nCONFIGURATION LIST: " (format "%s" (nreverse config))
+	      "\nSOURCE FILE: "))
   (let ((source-file (find-lisp-object-file-name epoxide-init-function 'defun)))
     (insert-button source-file
 		   'action (lambda (x)
@@ -980,8 +1141,8 @@ Format: *node:<NODE-NAME>:<NODE-CLASS>*"
 
 (defun epoxide-tsg-start-state ()
   "Tsg file parsing state which handles the beginning of a new expression."
+  (epoxide-tsg-skip-whitespaces)
   (when (< (point) (point-max))
-    (epoxide-tsg-skip-whitespaces)
     (cond
      ((member (following-char) '(?\( ?\;))
       ;; Expression cannot start with parameter list
@@ -994,7 +1155,10 @@ Format: *node:<NODE-NAME>:<NODE-CLASS>*"
       ;; Expression cannot start with ::, -> or --> operators, signal error.
       (epoxide-tsg-signal-parse-error))
      (t
-      (epoxide-tsg-name-or-class (current-word))))))
+      (epoxide-tsg-name-or-class (current-word)))))
+  (epoxide-tsg-skip-whitespaces)
+  (unless (eobp)
+    (epoxide-tsg-start-state)))
 
 (defun epoxide-tsg-name-or-class (word)
   "Switch to class state if WORD can be found among the node definitions."
@@ -1028,8 +1192,7 @@ Format: *node:<NODE-NAME>:<NODE-CLASS>*"
    ((equal (current-word) "->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
-      (epoxide-tsg-create-node))
-    (epoxide-tsg-start-state))
+      (epoxide-tsg-create-node)))
    ((equal (current-word) "-->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
@@ -1059,8 +1222,7 @@ Add an incremented index to the class named CLASS-NAME."
    ((equal (current-word) "->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
-      (epoxide-tsg-create-node))
-    (epoxide-tsg-start-state))
+      (epoxide-tsg-create-node)))
    ((equal (current-word) "::")
     (forward-word)
     (epoxide-tsg-class-state))
@@ -1107,8 +1269,7 @@ Values are saved to buffer local variable `epoxide-tsg-input-buffers'."
    ((equal (current-word) "->")
     (unless (epoxide-tsg-create-view)
       (epoxide-tsg-create-node))
-    (forward-word)
-    (epoxide-tsg-start-state))
+    (forward-word))
    ((equal (current-word) "-->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
@@ -1128,8 +1289,7 @@ Values are saved to buffer local variable `epoxide-tsg-input-buffers'."
    ((equal (current-word) "->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
-      (epoxide-tsg-create-node))
-    (epoxide-tsg-start-state))
+      (epoxide-tsg-create-node)))
    ((equal (current-word) "-->")
     (forward-word)
     (unless (epoxide-tsg-create-view)
@@ -1156,8 +1316,7 @@ Values are saved to buffer local variable `epoxide-tsg-config-list'."
   (epoxide-tsg-release-temporary-variables)
   (epoxide-tsg-clear-prev-node)
   (forward-char)
-  (epoxide-tsg-skip-whitespaces)
-  (epoxide-tsg-start-state))
+  (epoxide-tsg-skip-whitespaces))
 
 (defun epoxide-tsg-clear-prev-node ()
   "Clear information of previous node."
@@ -1170,15 +1329,22 @@ When optional argument ASSIGN-NODE-BUFFER is non-nil, the
 previous node's buffer is assigned to the specified inputs
 instead of the link buffers."
   (let* ((view (epoxide-tsg-view-fetch-by-name epoxide-tsg-node-name))
+	 (node (epoxide-tsg-fetch-node-by-name epoxide-tsg-node-name))
 	 (class (if view
 		    "View"
 		  epoxide-tsg-node-class)))
+    ;; When this item is not associated to any class, and it is not
+    ;; a preexisting node, assume it is a view.
+    (when (and (null class)
+	       (null node))
+      (setq class "View"))
     (when (equal class "View")
       (cond
-       ((and view epoxide-tsg-node-class
-	     (not (equal epoxide-tsg-node-class class)))
+       ((or node
+	    (and view epoxide-tsg-node-class
+		 (not (equal epoxide-tsg-node-class class))))
 	;; If a view and a node has the same name: signal error.
-	(epoxide-tsg-signal-name-conflict (current-word) (line-number-at-pos)
+	(epoxide-tsg-signal-name-conflict epoxide-tsg-node-name (line-number-at-pos)
 				       (- (point) (line-beginning-position))))
        ((null view)
 	;; A new view should be added to the list of views.
@@ -1227,12 +1393,20 @@ instead of the link buffers."
 (defun epoxide-tsg-create-node ()
   "Create a node structure from the collected information."
   (let* ((node (epoxide-tsg-fetch-node-by-name epoxide-tsg-node-name))
+	 (view (epoxide-tsg-view-fetch-by-name epoxide-tsg-node-name))
 	 (class (when node (node-class node))))
     (cond
-     ((and (null epoxide-tsg-node-class)
-    	   (null node))
-      ;; If node has no assigned class now and it wasn't previously defined,
+     ((and view class)
+      ;; When there has been a view created with this name,
       ;; signal error.
+      (epoxide-tsg-signal-name-conflict epoxide-tsg-node-name
+					(line-number-at-pos)
+					(- (point) (line-beginning-position))))
+     ((and (null epoxide-tsg-node-class)
+    	   (null node)
+	   (null view))
+      ;; If node has no assigned class now and it wasn't previously
+      ;; defined either as a node or a view, signal error.
       (epoxide-tsg-signal-undefined-node-error epoxide-tsg-node-name))
      ((and node
 	   epoxide-tsg-node-class
@@ -1248,6 +1422,7 @@ instead of the link buffers."
 		       :name epoxide-tsg-node-name
 		       :class epoxide-tsg-node-class
 		       :config-list epoxide-tsg-config-list
+		       :dynamic-config-list (epoxide-tsg-set-up-dynamic-config-list nil)
 		       :input-buffers (epoxide-tsg-set-up-input-buffers nil)
 		       :output-buffers (epoxide-tsg-set-up-output-buffers))))
 	(setq-local epoxide-tsg-node-list (cons new-node epoxide-tsg-node-list))
@@ -1265,6 +1440,8 @@ instead of the link buffers."
 		       :config-list (if epoxide-tsg-config-list
 					epoxide-tsg-config-list
 				      (node-config-list node))
+		       :dynamic-config-list (epoxide-tsg-set-up-dynamic-config-list
+		       			     (node-dynamic-config-list node))
 		       :input-buffers (epoxide-tsg-set-up-input-buffers
 				       (node-input-buffers node))
 		       :output-buffers
@@ -1324,8 +1501,7 @@ instead of the link buffers."
       (epoxide-tsg-create-view t))))
   (forward-char)
   (epoxide-tsg-release-temporary-variables)
-  (epoxide-tsg-clear-prev-node)
-  (epoxide-tsg-start-state))
+  (epoxide-tsg-clear-prev-node))
 
 (defun epoxide-tsg-fetch-node-by-name (name)
   "Fetch the node that has the name NAME from epoxide-tsg-node-list."
@@ -1343,6 +1519,8 @@ epoxide-tsg-input-buffers select the indices of INPUTS that should
 be modifed.  Modified elements are set to the approriate previous
 output buffers."
   (cond
+   ((null epoxide-tsg-prev-node-name)
+    inputs)
    ((and (equal 1 (length epoxide-tsg-prev-output-buffers))
 	 (member (length epoxide-tsg-input-buffers) '(0 1)))
     (if (null epoxide-tsg-input-buffers)
@@ -1358,20 +1536,56 @@ output buffers."
 	;; Connect input 0 to output 0 of previous node.
 	(epoxide-setl inputs 0 (epoxide-tsg-assign-name-to-output-buffer
                                 epoxide-tsg-prev-node-name 0))
-      ;; Connect the specified input to output 0 of previous node.
-      (epoxide-setl inputs (string-to-number (car epoxide-tsg-input-buffers))
-                    (epoxide-tsg-assign-name-to-output-buffer
-                     epoxide-tsg-prev-node-name 0))))
+      (if (< (string-to-number (car epoxide-tsg-input-buffers)) 0)
+      	  ;; When a config parameter should be modified, nothing needs to be
+      	  ;; changed.
+      	  inputs
+      	;; Connect the specified input to output 0 of previous node.
+      	(epoxide-setl inputs (string-to-number (car epoxide-tsg-input-buffers))
+      		      (epoxide-tsg-assign-name-to-output-buffer
+      		       epoxide-tsg-prev-node-name 0)))))
    ((not (equal (length epoxide-tsg-prev-output-buffers)
 		(length epoxide-tsg-input-buffers)))
     ;; Cannot pair inputs with outputs, signal error.
     (epoxide-tsg-signal-output-input-mismatch epoxide-tsg-node-name))
    (t
-    ;; Pair the specified inputs with the specified outputs of the previous
-    ;; node.
-    (epoxide-enumerate (i input epoxide-tsg-input-buffers inputs)
-      (epoxide-list-setq inputs (string-to-number input)
-                         (nth i epoxide-tsg-prev-output-buffers))))))
+    ;; Discover items to be associated with inputs.
+    (let* ((p (epoxide-tsg-separate-input-and-config
+	       epoxide-tsg-input-buffers epoxide-tsg-prev-output-buffers))
+	   (in (cadr (assoc 'input-input p)))
+	   (out (cadr (assoc 'output-input p))))
+      ;; Pair the specified inputs with the specified outputs of the previous
+      ;; node.
+      (epoxide-enumerate (i input in inputs)
+      	(epoxide-list-setq inputs (string-to-number input)
+      			   (nth i out)))))))
+
+(defun epoxide-tsg-separate-input-and-config (inputs outputs)
+  "Discover which buffers should connected to inputs and which ones to config.
+
+INPUTS carries a node's input specification (read from the .tsg
+file) and is a list of positive and negative indices (where
+negative values define assignment to configuration arguments)
+wile OUTPUTS carries the outputs of the previous node's
+outputs (positive indices)."
+  (let ((in (copy-sequence inputs))
+	(out (copy-sequence outputs))
+	input-i config-i input-o config-o)
+    (dolist (i in)
+      (if (> (string-to-number i) -1)
+	(progn
+	  (push (pop out) input-i)
+	  (push i input-o))
+	(push (pop out) config-i)
+	(push (number-to-string (* (1+ (string-to-number i)) -1)) config-o)))
+    (setq input-i (nreverse input-i))
+    (setq config-i (nreverse config-i))
+    (setq input-o (nreverse input-o))
+    (setq config-o (nreverse config-o))
+    `((output-input ,input-i)
+      (output-config ,config-i)
+      (input-input ,input-o)
+      (input-config ,config-o))))
 
 (defun epoxide-tsg-set-up-output-buffers ()
   "Give output buffers a name based on the node name and their index.
@@ -1383,7 +1597,7 @@ Set `epoxide-tsg-prev-output-buffers' to the buffer names generated
 by this node's output buffer numbers.  This function should be
 called only after the node's input buffers are set otherwise
 links will not be connected properly."
-  (let* (enabled-outputs)
+  (let* (enabled-outputs tmp)
     (setq-local epoxide-tsg-prev-output-buffers
 		(mapcar (lambda (x)
 			  (epoxide-tsg-assign-name-to-output-buffer
@@ -1398,11 +1612,42 @@ links will not be connected properly."
 			   (unless (equal o '(auto-create . nil))
 			     (setq enabled-outputs (cons i enabled-outputs))))))
     (setq enabled-outputs (append enabled-outputs epoxide-tsg-output-buffers))
-    (setq enabled-outputs (delete-dups (sort enabled-outputs '<)))
+    (dolist (e enabled-outputs)
+      (if (stringp e)
+	  (push (string-to-number e) tmp)
+	(push e tmp)))
+    (setq enabled-outputs (delete-dups (sort (nreverse tmp) '<)))
     (mapcar (lambda (x)
-              (epoxide-tsg-assign-name-to-output-buffer
-	       epoxide-tsg-node-name x))
-	    enabled-outputs)))
+    	      (epoxide-tsg-assign-name-to-output-buffer
+    	       epoxide-tsg-node-name x))
+    	    enabled-outputs)))
+
+(defun epoxide-tsg-set-up-dynamic-config-list (configs)
+  "Assign node output buffers to config arguments.
+
+CONFIGS contains the node's current dynamic configuration list."
+  (cond
+   ((and (null epoxide-tsg-prev-output-buffers)
+	 (equal (length epoxide-tsg-input-buffers) 1)
+	 (< (string-to-number (car epoxide-tsg-input-buffers)) 0)
+	 epoxide-tsg-prev-node-name)
+    ;; Connect the specified config to output 0 of previous node.
+    (epoxide-setl configs (* -1 (1+ (string-to-number
+				     (car epoxide-tsg-input-buffers))))
+		  (epoxide-tsg-assign-name-to-output-buffer
+		   epoxide-tsg-prev-node-name 0)))
+   (t
+    ;; Discover items to be associated with config arguments.
+    (let* ((p (epoxide-tsg-separate-input-and-config
+	       epoxide-tsg-input-buffers
+	       epoxide-tsg-prev-output-buffers))
+	   (output-buffers (cadr (assoc 'output-config p)))
+	   (config-indices (cadr (assoc 'input-config p))))
+      ;; Pair the specified configuration arguments with the specified
+      ;; outputs of the previous node.
+      (epoxide-enumerate (c config config-indices configs)
+	(epoxide-list-setq configs (string-to-number config)
+			   (nth c output-buffers)))))))
 
 (defun epoxide-tsg-assign-name-to-output-buffer (node-name output-number)
   "Create a name for the output buffer of node NODE-NAME.
@@ -1471,13 +1716,27 @@ NAME, COLS, ROWS and BUF-LIST are the attributes of a view structure."
 
 (defun epoxide-view-show (number)
   "Show view #NUMBER from 'epoxide-view-list.
+
 The view's layout is defined by the cols and rows attribute of
-the view if present.  Otherwise, a 2-row layout which shows every
-connected input of the given view is presented.
+the view if present.  Otherwise, an automatic layout which shows
+every connected input of the given view is presented.
 
 This function is based on 'split-window-multiple-ways from
 http://www.emacswiki.org/emacs/GridLayout."
   (interactive "p")
+  (with-current-buffer (epoxide-get-root-buffer)
+    (when (null epoxide-view-list)
+      (epoxide-view-add epoxide-default-view-name nil nil
+			`(,(buffer-name)
+			  ,(car (mapcar 'identity
+				  (delq nil
+					(apply 'append
+					       (mapcar
+						'node-output-buffers
+						(epoxide-get-nodes
+						 (current-buffer)))))))))
+      (epoxide-tsg-eldoc-add-node epoxide-default-view-name "View"
+				  (current-buffer))))
   (let* ((number (if current-prefix-arg
 		     number
 		   (with-current-buffer (epoxide-get-root-buffer)
@@ -1487,29 +1746,29 @@ http://www.emacswiki.org/emacs/GridLayout."
 	x y buffers w)
     (when view
       (setq buffers (copy-sequence (view-input-buffers view)))
-      (if (view-rows view)
-	  (setq y (view-rows view))
-	(setq y 2))
-      (if (view-cols view)
-	  (setq x (view-cols view))
-	(setq x (/ (1+ (length buffers)) y)))
-      (delete-other-windows)
-      (setq w (selected-window))
-      (dotimes (i (1- x))
-	(split-window-horizontally)
+      (when (view-rows view)
+	  (setq y (view-rows view)))
+      (when (view-cols view)
+	  (setq x (view-cols view)))
+      (if (or (null y) (null x))
+	  (epoxide-display-buffers buffers t)
+	(delete-other-windows)
+	(setq w (selected-window))
+	(dotimes (i (1- x))
+	  (split-window-horizontally)
+	  (dotimes (j (1- y))
+	    (split-window-vertically))
+	  (other-window y))
 	(dotimes (j (1- y))
 	  (split-window-vertically))
-	(other-window y))
-      (dotimes (j (1- y))
-	(split-window-vertically))
-      (balance-windows)
-      (select-window w)
-      (dotimes (i (* x y))
-	(switch-to-buffer (pop buffers))
-	(other-window 1))
+	(balance-windows)
+	(select-window w)
+	(dotimes (i (* x y))
+	  (switch-to-buffer (pop buffers))
+	  (other-window 1)))
       (with-current-buffer (epoxide-get-root-buffer)
 	(setq-local epoxide-view-last-index number))
-      (message "Switched to EPOXIDE View #%s." number))))
+      (message "Switched to EPOXIDE View #%s (%s)." number (view-name view)))))
 
 (defun epoxide-view-show-adjacent (direction)
   "Show next or prevoius view from the view-list depending on DIRECTION.
@@ -1571,6 +1830,46 @@ position is stored in `epoxide-view-last-index'."
      (value-validator . epoxide-positive-number-p))
     ((doc-string . "number of rows")
      (value-validator . epoxide-positive-number-p))))
+
+(defun epoxide-view-show-views ()
+  "Show view associated buffers in an Ibuffer listing.
+Provide option to change to a new view based on a selection of
+its name."
+  (interactive)
+  (let* ((i 0)
+	 (ibuffer-show-empty-filter-groups nil) ;; Hide empty groups.
+	 (root-buffer (epoxide-get-root-buffer))
+	 groups views ibuffer-saved-filter-groups selected-view)
+    (with-current-buffer root-buffer
+      (dolist (v epoxide-view-list)
+	(let ((name (view-name v)))
+	  (push (epoxide-ibuffer-build-filter-list
+		 (format "Buffers in view %s (#%s)" name i)
+		 (copy-sequence (view-input-buffers v)))
+		groups)
+	  (push name views)
+	  (incf i))))
+    (setq groups (nreverse groups))
+    (setq views (nreverse views))
+    (setq ibuffer-saved-filter-groups
+          (append ibuffer-saved-filter-groups
+                  (list (cons "epoxide" (list groups)))))
+    (ibuffer)
+    (setq ibuffer-filter-groups groups)
+    (ibuffer-update nil t)
+    (setq selected-view (with-current-buffer root-buffer
+			  (ido-completing-read
+			   "Choose view: "
+			   views)))
+    (let ((selected-index (when (member selected-view views)
+			    (- (length views)
+			       (length (member selected-view views))))))
+      (kill-buffer "*Ibuffer*")
+      (if (null selected-index)
+	  (message "No such view: %s" selected-view)
+	(with-current-buffer root-buffer
+	  (setq-local epoxide-view-last-index selected-index))
+	(epoxide-view-show 0)))))
 
 
 ;; --------------    Adding a new node    --------------------------------------
@@ -1735,6 +2034,20 @@ error was detected at."
 		 "class at line %d, character %d")
 		 (line-number-at-pos) (- (point) (line-beginning-position))))
 
+(defun epoxide-signal-function-eval-error (function err)
+  "Give a message when there was an error applying FUNCTION.
+
+FUNCTION gives the read function-like expression (function,
+lambda function, special form) and ERR is the error signalled
+when applying or eavluating FUNCTION."
+  (epoxide-log (format
+		(concat
+		 "Epoxide function eval/apply error in "
+		 "%s::%s with function-like form %s: %s")
+		epoxide-node-name epoxide-node-class
+		function (error-message-string err)))
+  nil)
+
 
 ;; --------------    Killing EPOXIDE buffers and erasing    --------------------
 ;; ---------------------    buffer local variables    --------------------------
@@ -1789,29 +2102,46 @@ current buffer."
 		       epoxide-link-mode epoxide-tsg-visualizer-mode)))
         ;; This buffer is associated with a TSG.
 	(let ((name (buffer-name root-buffer)))
-	  (y-or-n-p-with-timeout
-	   (concat "Kill this epoxide session (" name ")? ")
-	   5 nil))
+	  (if (with-current-buffer root-buffer
+		(and (epoxide-event-running-p) epoxide-tsg-node-list))
+	      (y-or-n-p-with-timeout
+	       (concat "Kill this epoxide session (" name ")? ")
+	       5 nil)
+	    t))
       t)))
 
-(defun epoxide-tsg-kill ()
+(defun epoxide-tsg-kill-all ()
+  "Kill all epoxide related buffers, including the root buffer."
+  (epoxide-tsg-kill t))
+
+(defun epoxide-tsg-kill (&optional kill-root-buffer)
   "Kill all buffers of curret buffer's troubleshooting graph.
 But keep the current buffer, so it could be used in the
-`kill-buffer-hook'."
+`kill-buffer-hook'.
+
+When optional argument KILL-ROOT-BUFFER is non-nil kill the
+buffer that displays the .tsg file also."
   (unless epoxide-tsg-shutdown-buffer
     (let* ((root-buffer (epoxide-get-root-buffer))
            (epoxide-tsg-shutdown-buffer (current-buffer)))
+      (if kill-root-buffer
+	  (with-current-buffer root-buffer
+	    (set-window-configuration epoxide-initial-window-config))
+	(delete-other-windows)
+	(switch-to-buffer root-buffer))
       (save-excursion
 	(epoxide-event-stop)
         (epoxide-tsg-kill-buffers
-	 root-buffer (list root-buffer "*Ibuffer*"
-			   (epoxide-tsg-visualizer-create-buffer-name
-			    (buffer-name root-buffer))))))))
+	 root-buffer
+	 (delq nil (list (when kill-root-buffer
+			   root-buffer)
+			 "*Ibuffer*"
+			 (epoxide-tsg-visualizer-create-buffer-name
+			  (buffer-name root-buffer)))))))))
 
 (defun epoxide-tsg-kill-buffers (root-buffer &optional buffers-to-close)
   "Kill buffers associated with a TSG defined in ROOT-BUFFER.
-BUFFERS-TO-CLOSE: additional buffers to kill.
-But don't kill the `epoxide-tsg-shutdown-buffer'."
+BUFFERS-TO-CLOSE: additional buffers to kill."
   (let ((nodes (epoxide-get-nodes root-buffer)))
     (dolist (node nodes)
       (when (get-buffer (epoxide-tsg-create-node-buffer-name
@@ -1829,8 +2159,7 @@ But don't kill the `epoxide-tsg-shutdown-buffer'."
 					 buffers-to-close)))))
     ;; All nodes are stopped at this point, every buffer can be killed.
     (dolist (buffer (delq nil buffers-to-close))
-      (unless (eq epoxide-tsg-shutdown-buffer (get-buffer buffer))
-        (epoxide-kill-buffer buffer t)))))
+      (epoxide-kill-buffer buffer t))))
 
 
 ;; --------------    Showing and editing EPOXIDE buffer local    ---------------
@@ -1870,7 +2199,7 @@ for it depending on what was selected."
      ((null var)
       ;; List all epoxide buffer local variables.
       (epoxide-variables-list))
-     ((string-match "config-list\\|inputs" (symbol-name (car var)))
+     ((string-match "epoxide-node-config-list\\|inputs" (symbol-name (car var)))
       ;; Show config or input parameters in an editable form.
       (epoxide-variable-edit var node-name node-class root-buffer))
      ((string-match "outputs" (symbol-name (car var)))
@@ -1905,7 +2234,8 @@ for it depending on what was selected."
       (setq label (pp-to-string var))
       ;; Make config or input related variables editable.
       (cond
-       ((string-match "config-list\\|inputs" (symbol-name (car var)))
+       ((string-match "epoxide-node-config-list\\|inputs"
+		      (symbol-name (car var)))
 	(insert-button label
 		       'action (lambda (x)
 				 (epoxide-variable-edit
@@ -1951,6 +2281,10 @@ Current node is specified with is NODE-NAME, NODE-CLASS and ROOT-BUFFER."
 						  (buffer-name root-buffer)
 						root-buffer)
 		   ":\n\n")
+    (when (string-match "config-list" (symbol-name (car variable)))
+      (widget-insert
+       "Note: dynamic configuration arguments take priority over static ones."
+       "\n\n"))
     ;; Create an editable list for getting new parameters.
     (widget-create 'editable-list
 		   :entry-format "%i %d %v"
@@ -2003,6 +2337,10 @@ Node's root buffer is ROOT-BUFFER."
 						  (buffer-name root-buffer)
 						root-buffer)
 		   " is:\n\n")
+    (when (string-match "config-list" (symbol-name (car variable)))
+      (widget-insert
+       "Note: dynamic configuration arguments take priority over static ones."
+       "\n\n"))
     (if (null (cdr variable))
 	(widget-insert "Not set.\n")
       (if (not (listp (cdr variable)))
@@ -2010,7 +2348,8 @@ Node's root buffer is ROOT-BUFFER."
 	;; When variable's value is a list, list those values and their
 	;; index in the list.
         (epoxide-enumerate (i x (cdr variable))
-          (widget-insert "#" (number-to-string i) ": " x "\n"))))
+          (widget-insert "#" (number-to-string i) ": " (format "%s" x)
+			 "\n"))))
     ;; List documentation of each parameter.
     (when doc
       (widget-insert "\nWhere:\n")
@@ -2369,7 +2708,7 @@ Node is identified by NODE-NAME and NODE-CLASS."
 
 (defun epoxide-tsg-set-config-in-tsg-file (node-name node-class values
 						  &optional save)
-  "Insert new config of a node to .tsg file.
+  "Find node definition is .tsg file if and change its config.
 
 NODE-NAME: name of the node the change is to be applied on.
 NODE-CLASS: class of the node the change is to be applied on.
@@ -2377,23 +2716,90 @@ VALUES: a list that holds the new configuration arguments.
 When optional argument SAVE is non-nil, the change is save to the file."
   (save-excursion
     (goto-char (point-min))
-    (if (not (search-forward (concat node-name " :: " node-class) nil t))
-	(error "Cannot set config for node '%s:%s': node name not found"
-	       node-name node-class)
-      (skip-chars-forward "^;([-")
-      (cond
-       ((member (following-char) '(?\; ?\[ ?-))
-	(insert "(" (mapconcat 'identity values ", ") ")"))
-       ((equal (following-char) ?\()
-	(let ((pos (+ (point) 1)))
-	  (skip-chars-forward "^)")
-	  (delete-region pos (point))
-	  (insert (mapconcat 'identity values ", "))))
-       (t
-	(error "Cannot set config for node '%s:%s': parse error"
-	       node-name node-class)))
-      (when save
-	(save-buffer)))))
+    (if (search-forward (concat node-name " :: " node-class) nil t)
+	(epoxide-tsg-set-config-in-tsg-file-helper
+	 node-name node-class values save)
+      ;; Node may have an automatically generated name. Try to find
+      ;; such.
+      (let (found break)
+	(while (and (null found)
+		    (null break))
+	  (if (null (search-forward node-class nil t))
+	      (setq break t)
+	    ;; Do not count this match if it is a comment.
+	    (unless (equal (get-text-property (point) 'face)
+			   'font-lock-comment-face)
+	      ;; Find the best match for this node by checking the
+	      ;; characters that could precede the node class.
+	      (let* ((pos (point))
+		     (s-pos
+		      (apply 'max
+			     `(,(epoxide-tsg-set-config-check-string "::")
+			       ,(epoxide-tsg-set-config-check-string ";")
+			       ,(epoxide-tsg-set-config-check-string "->")
+			       ,(epoxide-tsg-set-config-check-string "]"))))
+		     text tmp)
+		(setq text (buffer-substring (point) s-pos))
+		;; Remove text that appears as comment.
+		(with-temp-buffer
+		  (insert text)
+		  (goto-char (point-min))
+		  (while (< (point) (point-max))
+		    (if (equal (get-text-property (point) 'face)
+			       'font-lock-comment-face)
+			(delete-char 1)
+		      (forward-char)))
+		  (setq text (buffer-substring-no-properties
+			      (point-min) (point-max))))
+		(when (equal node-class (epoxide-chomp text))
+		  (setq found t)
+		  (goto-char pos)
+		  (setq break t))
+		(goto-char pos)))))
+	(if found
+	    (epoxide-tsg-set-config-in-tsg-file-helper
+	     node-name node-class values save)
+	  (error "Cannot set config for node '%s:%s': node name not found"
+		 node-name node-class))))))
+
+(defun epoxide-tsg-set-config-check-string (string)
+  "Find the nearest appearance of STRING before point and return its position.
+
+Return `point-min' if STRING cannot be found."
+  (let ((pos (point))
+	ret)
+    (while (null ret)
+      (if (search-backward string nil t)
+	  (when (not (equal (get-text-property (point) 'face)
+			    'font-lock-comment-face))
+	    (setq ret (+ (point) (length string))))
+	(unless ret
+	  (setq ret (point-min)))))
+    (goto-char pos)
+    ret))
+
+(defun epoxide-tsg-set-config-in-tsg-file-helper (node-name node-class values
+							    &optional save)
+  "Insert new config of a node to .tsg file.
+
+NODE-NAME: name of the node the change is to be applied on.
+NODE-CLASS: class of the node the change is to be applied on.
+VALUES: a list that holds the new configuration arguments.
+When optional argument SAVE is non-nil, the change is save to the file."
+  (skip-chars-forward "^;([-")
+  (cond
+   ((member (following-char) '(?\; ?\[ ?-))
+    (insert "(" (mapconcat 'identity values ", ") ")"))
+   ((equal (following-char) ?\()
+    (let ((pos (+ (point) 1)))
+      (skip-chars-forward "^)")
+      (delete-region pos (point))
+      (insert (mapconcat 'identity values ", "))))
+   (t
+    (error "Cannot set config for node '%s:%s': parse error"
+	   node-name node-class)))
+  (when save
+    (save-buffer)))
 
 (defun epoxide-tsg-set-inputs-in-tsg-file (node root-buffer value
 						&optional save)
@@ -2443,7 +2849,6 @@ When optional argument SAVE is non-nil, the change is save to the file."
 
 
 ;; --------------    Interacting with Ibuffer    -------------------------------
-(defvar ibuffer-filter-groups) ;; from ibuf-ext.el
 
 (defun epoxide-ibuffer-next-nodes-group (name class nodes)
   "Create an Ibuffer group from the succeeding nodes of the current node.
@@ -2631,66 +3036,13 @@ Nodes are looked up in the list NODES."
 (defun epoxide-show-all-outputs ()
   "Show every output buffer of the current node.
 
-Current window is divided into two parts: the first will be the
-upper left quarter of the current window, it will display the
-node's buffer, the rest will be devided among the output buffers.
-
-Windows are expected to be at least 5 lines in height where
-possible.  When Emacs screen size is too small for every output
-buffer to fit in, a notification is given."
+Currently open buffers stay displayed and current windows are
+split in order to fit as many buffers as possible.  When frame
+size is too small to accomodate more windows, a notification is
+written to the messages buffer."
   (interactive)
-  (let* ((origin (current-buffer))
-	 (row-count (window-body-height))
-	 (output-count (length epoxide-node-outputs))
-	 (outputs (nreverse (copy-sequence epoxide-node-outputs)))
-	 (last (car outputs))
-	 cannot-fit height)
-    (when (> output-count 0)
-      (setq outputs (nreverse (cdr outputs)))
-      (when (>= output-count 2)
-	(split-window-horizontally))
-      (split-window-vertically)
-      (other-window 1)
-      ;; Windows should be at least 5 rows high, if possible.
-      (while (< (/ (* 1.5 row-count) output-count) 5)
-	(decf output-count))
-      (setq height (floor (/ (* 1.5 row-count) output-count)))
-      ;; Create new windows for output buffers until they fit in the lower left
-      ;; part of the original buffer.
-      (while (and outputs (null cannot-fit))
-	(condition-case nil
-	    (progn
-	      (split-window (get-buffer-window) height)
-	      (switch-to-buffer (car outputs))
-	      (other-window 1)
-	      (setq outputs (cdr outputs)))
-	  (error (setq cannot-fit t))))
-      ;; Switch to the next output buffer in the last new window in the left
-      ;; half.
-      (switch-to-buffer (car outputs))
-      (setq outputs (cdr outputs))
-      ;; Continue the same way on the right side.
-      (when cannot-fit
-	(setq cannot-fit nil)
-	(other-window 1)
-	(current-buffer)
-	(while (and outputs (null cannot-fit))
-	  (condition-case nil
-	      (progn
-		(split-window (get-buffer-window) height)
-		(switch-to-buffer (car outputs))
-		(other-window 1)
-		(setq outputs (cdr outputs)))
-	    (error
-	     (progn
-	       (setq cannot-fit t)
-	       (message "Screen size is too small for show outputs after '%s'"
-			(car outputs)))))))
-      ;; Switch to the last remaining output buffer.
-      (switch-to-buffer last)
-      (balance-windows)
-      ;; Move point back the window where the node's buffer is shown.
-      (select-window (get-buffer-window origin)))))
+  (let* ((buffers (cons (current-buffer) (copy-sequence epoxide-node-outputs))))
+    (epoxide-display-buffers buffers)))
 
 (defun epoxide-jump-to-preceding-node ()
     "Jump to the preceeding buffer from the current node buffer.
@@ -2980,6 +3332,8 @@ See `epoxide-tsg-visualizer-show-links'.")
     (define-key map (kbd "C-x n") 'epoxide-tsg-visualizer-next-node)
     (define-key map (kbd "C-x p") 'epoxide-tsg-visualizer-previous-node)
     (define-key map (kbd "M-g e") 'epoxide-switch-to-root-buffer)
+    (define-key map (kbd "C-c C-k") 'epoxide-tsg-kill-all)
+    (define-key map (kbd "M-g V") 'epoxide-view-show-views)
     map)
   "Keymap for `epoxide-tsg-visualizer-mode'.")
 
@@ -3565,6 +3919,7 @@ Return the output as a string, see `shell-command-to-string' for
 details.  HOST is a host definition, see
 `epoxide-get-default-directory'."
   (let ((default-directory (epoxide-get-default-directory host)))
+    (setq tramp-verbose epoxide-tramp-verbose-level)
     (shell-command-to-string command)))
 
 (defun epoxide-start-process (host &rest args)
@@ -3573,6 +3928,7 @@ ARGS are passed to `start-file-process'.  HOST is a host
 definition, see `epoxide-get-default-directory'."
   (let ((default-directory (epoxide-get-default-directory host))
 	process)
+    (setq tramp-verbose epoxide-tramp-verbose-level)
     (setq process (apply 'start-file-process args))
     (when process
       (set-process-query-on-exit-flag process nil))
@@ -3613,7 +3969,7 @@ CANDIDATE is assumed to be a node class."
     	(setq doc (concat doc "\n\n" (upcase type) ":\n"))
     	(dolist (r res)
     	  (setq doc (concat doc "- " (number-to-string i) ": "
-			    (replace-regexp-in-string "\n" ". " r "\n")))
+			    (replace-regexp-in-string "\n" ". " r) "\n"))
     	  (incf i))))
     doc))
 
@@ -3677,21 +4033,11 @@ Funcion based on ac-dabbrev.el by Kenichirou Oyama."
 
 ;; --------------    EPOXIDE global functions    -------------------------------
 
-(defun epoxide-write-node-output (output output-buffer-name)
-  "Insert OUTPUT into buffer named OUTPUT-BUFFER-NAME.
-When point is at `point-max' in the buffer, insertion moves point,
-otherwise point stays where it has been.  When buffer is displayed
-in a window but not selected, point acts the same."
-  (when (and output output-buffer-name)
-    (with-current-buffer output-buffer-name
-      (if (not (equal (point) (point-max)))
-	  (save-excursion
-	    (goto-char (point-max))
-	    (insert output))
-	(insert output)
-	(let (window)
-	  (when (setq window (get-buffer-window (current-buffer)))
-	    (set-window-point window (point-max))))))))
+(defun epoxide-string-or-nil (thing)
+  "Return nil when THING is a string nil, return THING itself otherwise."
+  (if (equal thing "nil")
+      nil
+    thing))
 
 (defun epoxide-substract (list-a list-b)
   "Substract from LIST-A the items of LIST-B and return the resulting list."
@@ -3819,6 +4165,250 @@ See `message' for the desciption of FORMAT-STRING and ARGS."
     (when (member string epoxide-switch-names)
       t)))
 
+(defun epoxide-ip-address-in-network (ip-address network-address net)
+  "Check whether an IPv4 address is in the scope of a subnetwork.
+
+IP-ADDRESS defines the address of a host, NETWORK-ADDRESS defines
+the subnet and NET the netmask that could either be quad-dotted
+notation or the prefix length and.  All arguments must be
+strings."
+  (let* ((f-1 (lambda (x)
+		(mapcar 'string-to-number (split-string x "\\."))))
+	 (f-2 (lambda (ipv4 netmask)
+		(let* ((net (mapconcat
+			     'epoxide-decimal-to-binary ipv4 ""))
+		       (netmask (split-string
+				 (mapconcat 'epoxide-decimal-to-binary
+					    netmask "") ""))
+		      (netmask (butlast (cdr netmask))))
+		  (substring net 0 (length (delete "0" netmask))))))
+	 (netmask (if (string-match "\\." net)
+		      net
+		    (epoxide-prefix-length-to-quad-dotted net)))
+	 (n (funcall f-2 (funcall f-1 network-address) (funcall f-1 netmask)))
+	 (ip (substring (mapconcat 'epoxide-decimal-to-binary
+				   (funcall f-1 ip-address) "") 0 (length n))))
+    (when (equal n ip)
+      t)))
+
+(defun epoxide-prefix-length-to-quad-dotted (network)
+  "Convert the NETWORK prefix length to quad-dotted notation."
+  (when (stringp network)
+    (setq network (string-to-number network)))
+  (let ((b (concat (make-string network ?1) (make-string (- 32 network) ?0)))
+	(ret ""))
+    (dotimes (i 4)
+      (let ((d (string-to-number (substring b (* i 8) (+ 8 (* i 8))) 2)))
+	(setq ret (format "%s.%s" ret d))))
+    (substring ret 1)))
+
+(defun epoxide-decimal-to-binary (decimal)
+  "Convert DECIMAL to an at least 8 bit binary and return it as a string."
+  (let ((b ""))
+    (while (not (equal decimal 0))
+      (setq b (concat (if (equal 1 (logand decimal 1)) "1" "0") b))
+      (setq decimal (lsh decimal -1)))
+    (when (equal b "")
+      (setq b "0"))
+    (if (< (length b) 8)
+	(concat (make-string (- 8 (length b)) ?0) b)
+      b)))
+
+
+;; --------------    EPOXIDE node support functions    -------------------------
+
+(defun epoxide-write-node-output (output output-buffer-name &optional face)
+  "Insert OUTPUT into buffer named OUTPUT-BUFFER-NAME with FACE.
+When point is at `point-max' in the buffer, insertion moves point,
+otherwise point stays where it has been.  When buffer is displayed
+in a window but not selected, point acts the same."
+  (when (and output output-buffer-name)
+    (let ((output (if face
+		      (propertize output 'face face)
+		    output)))
+    (with-current-buffer output-buffer-name
+      (if (not (equal (point) (point-max)))
+	  (save-excursion
+	    (goto-char (point-max))
+	    (insert output))
+	(insert output)
+	(let (window)
+	  (when (setq window (get-buffer-window (current-buffer)))
+	    (set-window-point window (point-max)))))))))
+
+(defun epoxide-node-read-inputs (&optional wait-for-all-inputs
+					   set-markers)
+  "Read every input of a node.
+
+Return a list buffer name (from where the input was read) read
+string pairs.  When optional argument WAIT-FOR-ALL-INPUTS is
+non-nil, return nil until every input has some data and do not
+move marker positions.  When SET-MARKERS is non-nil new marker
+positions are set even when WAIT-FOR-ALL-INPUTS is set and there
+are inputs having no data."
+  (unless (boundp 'epoxide-input-markers)
+    (set (make-local-variable 'epoxide-input-markers) nil))
+  (let ((node-buffer (current-buffer))
+	(markers (copy-sequence epoxide-input-markers))
+	(input-list (copy-sequence epoxide-node-inputs))
+	new-markers inputs)
+    (dolist (i (reverse input-list))
+      (let* ((r (epoxide-node-read-input
+		 i (epoxide-node-get-input-pos i markers)))
+    	     (pos (car r))
+    	     (input (cadr r)))
+	(when r
+	  (push `(,i ,pos) new-markers)
+	  (push `(,i ,input) inputs))))
+    (with-current-buffer node-buffer
+      (if wait-for-all-inputs
+	  (when (or set-markers
+		    (epoxide-node-all-inputs-ready inputs))
+	    (setq-local epoxide-input-markers (copy-sequence new-markers)))
+    	(setq-local epoxide-input-markers (copy-sequence new-markers)))
+      inputs)))
+
+(defun epoxide-node-get-input-pos (input markers)
+  "Return the current marker position for INPUT from MARKERS."
+  (let ((ret (cadr (assoc input markers))))
+    (unless ret
+      (setq ret 1))
+    ret))
+
+(defun epoxide-node-read-input (buffer start)
+  "Read node input from BUFFER with starting position START."
+  (let ((buffer (get-buffer buffer))
+	ret)
+    (unless start
+      (setq start 1))
+    (setq ret `(,start nil))
+    (when (and buffer
+	       (buffer-live-p buffer))
+      (with-current-buffer buffer
+	(let ((input (epoxide-chomp
+		      (buffer-substring-no-properties start (point-max)))))
+	  (when (> (length input) 0)
+	    (setq ret (cons (point-max) `(,input)))))))
+    ret))
+
+(defun epoxide-node-all-inputs-ready (inputs)
+  "Return t if every INPUTS have data, nil otherwise."
+  (unless (member 0
+		  (mapcar (lambda (x)
+			    (condition-case nil
+				(length (cadr x))
+			      (error 0))) inputs))
+    t))
+
+(defun epoxide-node-get-inputs-as-string (inputs)
+  "Concatenate read data from the list INPUTS."
+  (let (ret)
+    (dolist (i inputs)
+      (when (cadr i)
+	(push (cadr i) ret)))
+    (when ret
+      (concat (mapconcat 'identity (nreverse ret) "\n") "\n"))))
+
+(defun epoxide-node-get-inputs-as-list (inputs)
+  "Return a list of only the read data of the list INPUTS."
+  (mapcar (lambda (x)
+	       (cadr x))
+	     inputs))
+
+(defun epoxide-node-enable-input-active (inputs enable-input)
+  "Return t when the node has new data on its enable input.
+
+INPUTS contains the data from the node's every
+input.  ENABLE-INPUT specifies the input buffer where the enable
+signal is expected.  ENABLE-INPUT can either be a buffer or a
+buffer name or number specifing the index of the input in
+INPUTS."
+  (let* ((in (cond
+	      ((stringp enable-input)
+	       enable-input)
+	      ((bufferp enable-input)
+	       (buffer-name enable-input))
+	      ((numberp enable-input)
+	       (car (nth enable-input inputs)))
+	      (t nil)))
+	 (e (cadr (assoc in inputs))))
+    (when (and e (> (length e) 0))
+      t)))
+
+(defun epoxide-node-get-config (&optional index)
+  "Return the current node's configuration arguments.
+
+Iterate through the node's static and dynamic configuration
+arguments and return the currently active ones.  If a node has
+dynamic configuration arguments (that is the arguments are read
+from a buffer) those take priority over the static ones (those
+specified in the configuration list).
+
+When optional argument INDEX is present return only the specified
+argument."
+  (if index
+      (let* ((dynamic (nth index epoxide-node-dynamic-config-list))
+	     (ret (if dynamic
+		      (epoxide-node-read-config-buffer dynamic)
+		    (nth index epoxide-node-config-list))))
+	(epoxide-string-or-nil ret))
+    (let ((max-length (if (> (length epoxide-node-config-list)
+			     (length epoxide-node-dynamic-config-list))
+			  (length epoxide-node-config-list)
+			(length epoxide-node-dynamic-config-list)))
+	  (i 0)
+	  ret)
+      (while (< i max-length)
+	(if (null (nth i epoxide-node-dynamic-config-list))
+	    (push (nth i epoxide-node-config-list) ret)
+	  (push (epoxide-node-read-config-buffer
+		 (nth i epoxide-node-dynamic-config-list))
+		ret))
+	(incf i))
+      (mapcar 'epoxide-string-or-nil (nreverse ret)))))
+
+(defun epoxide-node-read-config-buffer (buffer-or-name)
+  "Read the last line of BUFFER-OR-NAME without moving point."
+  (when (and buffer-or-name
+	     (buffer-live-p (get-buffer buffer-or-name)))
+    (with-current-buffer buffer-or-name
+      (save-excursion
+	(goto-char (point-max))
+	(goto-char (line-beginning-position))
+	(when (equal major-mode 'epoxide-link-mode)
+	  (forward-line -1))
+	(buffer-substring-no-properties (line-beginning-position)
+					(line-end-position))))))
+
+(defun epoxide-eval-function (function args)
+  "Evaluate FUNCTION on ARGS.
+
+FUNCTION should be a string representation of a function name,
+lambda function or special form (or, and).  ARGS should be a list
+of arguments with the correct type."
+  (let* ((function (epoxide-interpret-function function))
+	 (type (car function))
+	 (function (cadr function)))
+    (pcase type
+      (`elisp
+       (cond
+	((special-form-p function)
+	 (condition-case err
+	     (eval (cons function args))
+	   (error (epoxide-signal-function-eval-error function err))))
+	(t
+	 (condition-case err
+	     (apply function args)
+	   (error (epoxide-signal-function-eval-error function err)))))))))
+
+(defun epoxide-interpret-function (function)
+  "Create a real function from the string parameter FUNCTION."
+  (cond
+   ((equal (string-match "elisp:" function) 0)
+    `(elisp ,(car (read-from-string (substring function 6)))))
+   (t
+    `(elisp ,(car (read-from-string function))))))
+
 
 ;; --------------    Event Queue    --------------------------------------------
 
@@ -3826,15 +4416,16 @@ See `message' for the desciption of FORMAT-STRING and ARGS."
   "Add BUFFER-NAME to the event queue."
   (if epoxide-event-queue
       (push buffer-name (cdr (last epoxide-event-queue)))
-    (push buffer-name epoxide-event-queue)))
+    (push buffer-name epoxide-event-queue))
+  (run-with-idle-timer 0 nil #'epoxide-event--process-queue))
 
 (defun epoxide-event-start ()
   "Start scheduling events from the event queue."
   (when (timerp epoxide-event-timer)
     (cancel-timer epoxide-event-timer))
   (setq epoxide-event-timer
-	(tf-run-with-idle-timer 0 t 1 t nil
-				'epoxide-event--process-first)))
+	(tf-run-with-idle-timer 0.1 t 0.1 t nil
+				'epoxide-event--process-queue)))
 
 (defun epoxide-event-stop ()
   "Stop event queue scheduler by stoping its timer."
@@ -3847,18 +4438,30 @@ See `message' for the desciption of FORMAT-STRING and ARGS."
   "Return t if the event scheduler is running."
   (timerp epoxide-event-timer))
 
+(defun epoxide-event--process-queue (&rest ignore)
+  ;; checkdoc-params: (ignore)
+  "Process the event queue until it becomes empty when Emacs is idle."
+  (unless epoxide-event--processing-flag
+    (let ((epoxide-event--processing-flag t))
+      ;; (info "(elisp) Idle Timers") discourages to use
+      ;; `input-pending-p', but here it's not a problem to block other
+      ;; processes.1
+      (while (and (not (input-pending-p))
+                  epoxide-event-queue)
+        (epoxide-event--process-first)))))
+
 (defun epoxide-event--process-first ()
   "Process and remove the first item of the event queue."
+  (setq epoxide-event-queue (delete-dups epoxide-event-queue))
   (let ((epoxide-task (pop epoxide-event-queue)))
     (if epoxide-task
-	(with-current-buffer epoxide-task
-	  (condition-case err
-	      (funcall epoxide-exec-function)
-	    (error
-	     (message "Error when executing %s: %s"
-		      (symbol-name epoxide-exec-function)
-		      (error-message-string err)))
-	     nil)))))
+	(when (buffer-live-p (get-buffer epoxide-task))
+	  (with-current-buffer epoxide-task
+	    (condition-case err
+		(funcall epoxide-exec-function)
+	      (error (message "Error when executing %s: %s"
+			      (symbol-name epoxide-exec-function)
+			      (error-message-string err)))))))))
 
 
 ;; --------------    Task Handling    ------------------------------------------
@@ -3894,6 +4497,185 @@ See `after-change-functions' for the desciption of BEG, END, LEN."
   "Init function for links."
   (setq inhibit-modification-hooks nil)
   (add-hook 'after-change-functions 'epoxide--link-notify nil t))
+
+
+;; --------------    Node recommender    ---------------------------------------
+
+(defgroup epoxide-recommender nil
+  "Epoxide node recommender defaults."
+  :prefix 'epoxide
+  :group 'epoxide)
+
+(defcustom epoxide-tsg-file-collection
+  (concat (file-name-directory load-file-name) "../examples/")
+  "Location of .tsg file collection."
+  :type 'directory
+  :group 'epoxide-recommender)
+
+(defcustom epoxide-tsg-index-file-location
+  (concat (file-name-directory load-file-name))
+  "Location of .tsg index file."
+  :type 'directory
+  :group 'epoxide-recommender)
+
+(defcustom epoxide-recommender-method 'most-popular
+  "Define which method should be used for node recommendation.
+`most-popular': recommend the most frequently used nodes that do
+                not appear in the current TSG.
+`most-similar': choose TSGs that are the most similar to the current
+                TSG and and recommend their most frequently used
+                nodes that do not appear in the current TSG."
+  :type '(radio
+	  (const most-popular)
+	  (const most-similar))
+  :group 'epoxide-recommender)
+
+(defcustom epoxide-recommender-display-method 'ido
+  "Define which method should be used for node recommendation.
+`ido': use IDO to select from among the possible choices."
+  :type '(radio
+	  (const ido))
+  :group 'epoxide-recommender)
+
+(defvar epoxide-tsg-file-index nil
+  "Current data collected by indexing .tsg files.")
+
+(defun epoxide-recommender-index-tsg-files ()
+  "Collect which nodes are used in all the .tsg files.
+
+For better performance data is saved in a file and updated only
+when the respecitve .tsg files are changed."
+  (let* ((file-list
+	  (delq
+	   nil (mapcar (lambda (x)
+			 (when (equal 0 (string-match "[[:alnum:]-]+.tsg" x))
+			   (unless (string-match "~" x)
+			     (let ((file
+				    (expand-file-name
+				     (concat epoxide-tsg-file-collection x))))
+			       `(,file ,(nth 5 (file-attributes file)))))))
+		       (directory-files epoxide-tsg-file-collection))))
+	 (index-file
+	  (find-file-noselect
+	   (concat epoxide-tsg-index-file-location ".tsg-index.dat")))
+	 (indexed-tsgs
+	  (or epoxide-tsg-file-index
+	      (with-current-buffer index-file
+		(let ((string (buffer-substring-no-properties (point-min)
+							      (point-max))))
+		  (if (equal string "")
+		      nil
+		    (car (read-from-string string)))))))
+	 (node-classes (epoxide-tsg-get-node-classes))
+	 new-index update)
+    (dolist (f file-list)
+      (let ((indexed (assoc (car f) indexed-tsgs)))
+	(if (equal (cadr f) (cadr indexed))
+	    (push indexed new-index)
+	  (push (epoxide-recommender-index-tsg-file
+		 (car f) node-classes) new-index)
+	  (setq update t))))
+    (setq new-index (nreverse (delq nil new-index)))
+    (when update
+      (with-current-buffer index-file
+	(erase-buffer)
+	(insert (pp-to-string new-index))
+	(save-buffer)
+	(setq epoxide-tsg-file-index new-index)))
+    (unless epoxide-tsg-file-index
+      (setq epoxide-tsg-file-index new-index))
+    (kill-buffer index-file))
+  epoxide-tsg-file-index)
+
+(defun epoxide-recommender-index-tsg-file (file classes)
+  "Collect which nodes are used in FILE.
+
+CLASSES defines the strings that should be considered as a node
+class."
+  (let ((buf-list (buffer-list))
+	(buf
+	 (or (get-file-buffer file) ;; Get buffer is file is already open.
+	     (find-file-noselect file t t))) ;; Open file without `epoxide-mode'
+	                                     ;; otherwise.
+	node-classes)
+    (with-current-buffer buf
+      (setq file (buffer-file-name))
+      (save-excursion
+	(goto-char (point-min))
+	(while (re-search-forward
+		"\\([A-Z][[:alnum:]-]*?\\)\\s-*?[(|;]" nil t)
+	  (re-search-backward "\\([A-Z][[:alnum:]-]*?\\)\\s-*?[(|;]")
+	  (let* ((end (1+ (point)))
+		 (name-end (if (re-search-backward "::" nil t)
+			       (+ (point) 2)
+			     (line-beginning-position)))
+		 (exp-end (progn
+			    (goto-char end)
+			    (if (re-search-backward ";" nil t)
+				(1+ (point))
+			      (line-beginning-position))))
+		 (prev-node (progn
+			      (goto-char end)
+			      (if (re-search-backward ">" nil t)
+				  (1+ (point))
+				(line-beginning-position))))
+		 (start (max name-end exp-end prev-node))
+		 (class (epoxide-chomp
+			 (buffer-substring-no-properties start end))))
+	    (goto-char end)
+	    (unless (equal class "View")
+	      (when (member class classes)
+		(push class node-classes))))))
+      (unless (member (current-buffer) buf-list)
+	(kill-buffer)))
+    `(,file ,(nth 5 (file-attributes file)) ,(nreverse node-classes))))
+
+(defun epoxide-recommender-recommend ()
+  "Show recommended nodes."
+  (interactive)
+  (let* ((tsgs (epoxide-recommender-index-tsg-files))
+	 (recommender-name (symbol-name epoxide-recommender-method))
+	 (display (symbol-name epoxide-recommender-display-method))
+	 (base "epoxide-recommender-")
+	 (recommender (intern (concat base "recommend-" recommender-name)))
+	 (display (intern (concat base "display-" display))))
+    (insert (funcall display recommender-name
+		     (funcall recommender tsgs (buffer-file-name))))))
+
+(defun epoxide-recommender-recommend-most-popular (tsgs current-tsg)
+  "Create a list of the nodes ordered by their popularity.
+
+The must frequently used node will be at the head of the
+list.  Those nodes that appear in the current TSG get removed from
+the suggestion list.
+
+TSGS contain the indexed nodes of every TSG.  CURRENT-TSG is the
+buffer of the currently used TSG."
+  (let ((current-nodes (delete-dups (nth 2 (assoc current-tsg tsgs))))
+	nodes)
+    (dolist (tsg tsgs)
+      (dolist (node (nth 2 tsg))
+	(let ((item (assoc node nodes)))
+	  (if (null item)
+	      (unless (member node current-nodes)
+		(push `(,node 1) nodes))
+	    (setq nodes (delete item nodes))
+	    (push `(,(car item) ,(1+ (cadr item))) nodes)))))
+    (setq nodes (sort nodes (lambda (x y)
+			      (> (cadr x) (cadr y)))))
+    (mapcar 'car nodes)))
+
+(defun epoxide-recommender-recommend-most-similar (tsgs current-tsg)
+  ;; checkdoc-params: (tsgs current-tsg)
+  "Dummy function."
+  ;; TODO: to be implemented.
+  )
+
+(defun epoxide-recommender-display-ido (recommender suggestions)
+  "Display RECOMMENDER's SUGGESTIONS using IDO."
+  (ido-completing-read
+     (concat recommender ": ") suggestions))
+
 
 ;; --------------    Function calls    -----------------------------------------
 

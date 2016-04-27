@@ -1,6 +1,6 @@
 ;;; Dpids-pox.el --- EPOXIDE DPIDs POX node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -30,9 +30,9 @@
 ;;; Code:
 
 (require 'epoxide)
+(require 'url)     ; For accessing REST APIs.
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-previous-dpids)
   (defvar epoxide-previous-switch-names)
   (defvar epoxide-node-inputs)
@@ -59,31 +59,25 @@
 
 (defun epoxide-dpids-pox-init ()
   "Initialize variables."
-  (set (make-local-variable 'epoxide-input-marker) 1)
   (set (make-local-variable 'epoxide-previous-dpids) nil)
   (set (make-local-variable 'epoxide-previous-switch-names) nil))
 
 (defun epoxide-dpids-pox-exec ()
   "Query a POX controller for DPIDs and switch names."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(dpids-out (nth 0 epoxide-node-outputs))
-	(names-out (nth 1 epoxide-node-outputs))
-	(i 0)
-	(prev-dpids epoxide-previous-dpids)
-	(prev-names epoxide-previous-switch-names)
-	enable results dpids names
-	dpids-to-remove dpids-to-add
-	names-to-remove names-to-add)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (dpids-out (nth 0 epoxide-node-outputs))
+	 (names-out (nth 1 epoxide-node-outputs))
+	 (i 0)
+	 (prev-dpids epoxide-previous-dpids)
+	 (prev-names epoxide-previous-switch-names)
+	 (enable (epoxide-node-enable-input-active
+	  	  (epoxide-node-read-inputs) clock))
+	 results dpids names
+	 dpids-to-remove dpids-to-add
+	 names-to-remove names-to-add)
     (when (and clock host (or dpids-out names-out))
-      ;; Check changes in the input buffer.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	(setq results (epoxide-dpids--query host))
 	(when results
 	  (setq dpids (mapcar (lambda (result)
@@ -115,6 +109,7 @@
 
 Create a JSON message, then use it in an HTTP POST request.
 HOST: IP address of the host where POX is running at."
+  (setq-local url-show-status nil)
   (let* ((json-message (json-encode (json-add-to-object
 				     (json-add-to-object nil "id" "0")
 				     "method" "get_switches")))
@@ -122,7 +117,6 @@ HOST: IP address of the host where POX is running at."
 	 (url-request-method "POST")
 	 (url-request-extra-headers)
 	 (url-request-data json-message)
-	 (url-show-status nil)
 	 (result-buffer (url-retrieve-synchronously url))
 	 (switches-in-json (with-current-buffer result-buffer
 			     (goto-char (point-min))

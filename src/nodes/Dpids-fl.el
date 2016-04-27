@@ -1,6 +1,6 @@
 ;;; Dpids-fl.el --- EPOXIDE DPIDs Floodlight node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -29,9 +29,9 @@
 ;;; Code:
 
 (require 'epoxide)
+(require 'url)     ; For accessing REST APIs.
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-previous-dpids)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-config-list)
@@ -56,26 +56,20 @@
 
 (defun epoxide-dpids-fl-init ()
   "Initialize variables."
-  (set (make-local-variable 'epoxide-input-marker) 1)
   (set (make-local-variable 'epoxide-previous-dpids) nil))
 
 (defun epoxide-dpids-fl-exec ()
   "Query a Floodlight controller for DPIDs."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(dpids-out (nth 0 epoxide-node-outputs))
-	(prev-dpids epoxide-previous-dpids)
-	enable results dpids
-	dpids-to-remove dpids-to-add)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (dpids-out (nth 0 epoxide-node-outputs))
+	 (prev-dpids epoxide-previous-dpids)
+	 (enable (epoxide-node-enable-input-active
+	  	  (epoxide-node-read-inputs) clock))
+	 results dpids
+	 dpids-to-remove dpids-to-add)
     (when (and clock host dpids-out)
-      ;; Check changes in the input buffer.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	(setq results (epoxide-dpids-fl-query host))
 	(when results
 	  (setq dpids (mapcar (lambda (result)
@@ -99,12 +93,12 @@
 
 Return them as an alist of dpids and IP addresses.
 HOST: IP address of the host where the Floodlight controller is running at."
-    (let* ((url (concat "http://" host
+  (setq-local url-show-status nil)
+  (let* ((url (concat "http://" host
 		      ":8080/wm/core/controller/switches/json"))
 	 (url-request-method "GET")
 	 (url-request-extra-headers)
 	 (url-request-data nil)
-	 (url-show-status nil)
 	 (result-buffer (condition-case nil
 			    (url-retrieve-synchronously url)
 			  (error nil)))
@@ -117,19 +111,19 @@ HOST: IP address of the host where the Floodlight controller is running at."
 	 (number-of-switches (length all-data))
 	 (i 0)
 	 dpid ip-address switches)
-      (kill-buffer result-buffer)
-      (while (< i number-of-switches)
-	(setq dpid (cdr (assoc 'switchDPID (aref all-data i))))
-	(setq ip-address (cdr (assoc 'inetAddress (aref all-data i))))
-	(when (> (length ip-address) 0)
-	  (setq ip-address (substring ip-address 1)))
-	(setq switches (append (list `((dpid . ,dpid)
-				       (ip-address . ,ip-address)))
-			       switches))
-	(setq dpid nil)
-	(setq ip-address nil)
-	(incf i))
-      (nreverse switches)))
+    (kill-buffer result-buffer)
+    (while (< i number-of-switches)
+      (setq dpid (cdr (assoc 'switchDPID (aref all-data i))))
+      (setq ip-address (cdr (assoc 'inetAddress (aref all-data i))))
+      (when (> (length ip-address) 0)
+	(setq ip-address (substring ip-address 1)))
+      (setq switches (append (list `((dpid . ,dpid)
+				     (ip-address . ,ip-address)))
+			     switches))
+      (setq dpid nil)
+      (setq ip-address nil)
+      (incf i))
+    (nreverse switches)))
 
 (provide 'dpids-fl)
 

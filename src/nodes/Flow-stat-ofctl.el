@@ -1,6 +1,6 @@
 ;;; Flow-stat-ofctl.el --- EPOXIDE Flow stat OFCTL node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -36,7 +36,6 @@
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-outputs)
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-prev-conf-list))
 
 (defvar epoxide-flow-stat-ofctl-translation-table
@@ -72,28 +71,22 @@
 
 (defun epoxide-flow-stat-ofctl-init ()
   "Initialize variables."
-  (set (make-local-variable 'epoxide-input-marker) 1)
   (set (make-local-variable 'epoxide-node-prev-conf-list) nil))
 
 (defun epoxide-flow-stat-ofctl-exec ()
   "Connect to a host and query it for flow statistics using ovs-ofctl dump-dps."
-  (let ((marker epoxide-input-marker)
-	(clock (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
-	(switch-name (nth 1 epoxide-node-config-list))
-	(flow-stat-out (nth 0 epoxide-node-outputs))
-	enable results parts name line lines pos part-1)
+  (let* ((clock (nth 0 epoxide-node-inputs))
+	 (host (nth 0 epoxide-node-config-list))
+	 (switch-name (nth 1 epoxide-node-config-list))
+	 (flow-stat-out (nth 0 epoxide-node-outputs))
+	 (enable (epoxide-node-enable-input-active
+		  (epoxide-node-read-inputs) clock))
+	 results parts name line lines pos part-1)
     (unless (eq epoxide-node-prev-conf-list epoxide-node-config-list)
-      ;; configuration parameters have changed
+      ;; Configuration parameters have changed.
       (setq epoxide-node-prev-conf-list epoxide-node-config-list))
     (when (and clock host switch-name flow-stat-out)
-      ;; Check clock.
-      (with-current-buffer clock
-      	(when (< marker (point-max))
-      	  (setq enable t)
-      	  (setq marker (point-max))))
       (when enable
-	(setq-local epoxide-input-marker marker)
 	;; Initate query.
 	(setq results (epoxide-shell-command-to-string
                        host

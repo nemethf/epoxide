@@ -1,6 +1,6 @@
 ;;; Flow-space-filter.el --- EPOXIDE Flow space filter node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -34,7 +34,6 @@
 (require 'epoxide)
 
 (eval-when-compile
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-outputs))
@@ -59,45 +58,47 @@
   '(((doc-string . "filtered data"))))
 
 (defun epoxide-flow-space-filter-init ()
-  "Initialize node input marker."
-  (set (make-local-variable 'epoxide-input-marker) 1))
+  "Dummy function."
+  nil)
 
 (defun epoxide-flow-space-filter-exec ()
   "Return only those flow statistics that belong to the requested flow space."
-  (let* ((marker epoxide-input-marker)
-	 (data-buffer (nth 0 epoxide-node-inputs))
+  (let* ((data-buffer (nth 0 epoxide-node-inputs))
 	 (flow-space (nth 0 epoxide-node-config-list))
 	 (output (nth 0 epoxide-node-outputs))
-	 flow-stats flow-stat-list result
+	 (flow-stats (epoxide-node-get-inputs-as-string
+		      (epoxide-node-read-inputs)))
+	 flow-stat-list result
 	 src-params dst-params params match)
     (when output
-      ;; Read input.
-      (with-current-buffer data-buffer
-	(setq flow-stats (buffer-substring-no-properties marker (point-max)))
-	(setq marker (point-max)))
-      (setq-local epoxide-input-marker marker)
       ;; Parse flow space filter criteria.
       (when (> (length flow-stats) 0)
-	(setq src-params (epoxide-flow-space-filter--get-part flow-space 'src))
-	(setq dst-params (epoxide-flow-space-filter--get-part flow-space 'dst))
-	(setq params (append src-params dst-params))
 	;; Apply filter.
-	(when (and src-params dst-params)
-	  (setq flow-stat-list (split-string flow-stats "\n"))
-	  (dolist (flow-stat flow-stat-list)
-	    (setq match nil)
-	    (dolist (param params)
-	      (if (string-match param flow-stat)
-		  (setq match t)
-		(setq match nil)
-		(return)))
-	    (when match
-	      (setq result (cons flow-stat result))))
-	  ;; Print results.
-	  (when result
-	    (epoxide-write-node-output
-	     (concat (mapconcat 'identity (nreverse result) "\n") "\n")
-	     output)))))))
+	(if (null flow-space)
+	    (when (> (length flow-stats) 1)
+	      (setq result
+		    `(,(substring flow-stats 0 (1- (length flow-stats))))))
+	  (setq src-params
+		(epoxide-flow-space-filter--get-part flow-space 'src))
+	  (setq dst-params
+		(epoxide-flow-space-filter--get-part flow-space 'dst))
+	  (setq params (append src-params dst-params))
+	  (when (and src-params dst-params)
+	    (setq flow-stat-list (split-string flow-stats "\n"))
+	    (dolist (flow-stat flow-stat-list)
+	      (setq match nil)
+	      (dolist (param params)
+		(if (string-match param flow-stat)
+		    (setq match t)
+		  (setq match nil)
+		  (return)))
+	      (when match
+		(setq result (cons flow-stat result))))))
+	;; Print results.
+	(when result
+	  (epoxide-write-node-output
+	   (concat (mapconcat 'identity (nreverse result) "\n") "\n")
+	   output))))))
 
 (defun epoxide-flow-space-filter--get-part (flow-space type)
   "Parse a flow space definition.

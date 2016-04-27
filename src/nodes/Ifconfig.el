@@ -1,6 +1,6 @@
 ;;; Ifconfig.el --- EPOXIDE Ifconfig node definition file
 
-;; Copyright (C) 2015      István Pelle
+;; Copyright (C) 2015-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -36,7 +36,6 @@
 (eval-when-compile
   (defvar epoxide-node-name)
   (defvar epoxide-node-class)
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-outputs))
@@ -57,56 +56,46 @@
     ((doc-string . "negative output"))))
 
 (defun epoxide-ifconfig-init ()
-  "Initialize input markers."
-  (set (make-local-variable 'epoxide-input-marker) 1))
+  "Dummy function."
+  nil)
 
 (defun epoxide-ifconfig-exec ()
   "Run an ifconfig call."
-  (let ((marker epoxide-input-marker)
-	(enable-input (nth 0 epoxide-node-inputs))
-	(host (nth 0 epoxide-node-config-list))
+  (let ((host (nth 0 epoxide-node-config-list))
 	(check (nth 1 epoxide-node-config-list))
 	(excludes (cddr epoxide-node-config-list))
 	(output (nth 0 epoxide-node-outputs))
 	(negative-output (nth 1 epoxide-node-outputs))
-	result enabled)
-    (when enable-input
-      (with-current-buffer enable-input
-	(setq marker (point-max)))
-      (when (> marker epoxide-input-marker)
-	(setq enabled t))
-      (setq-local epoxide-input-marker marker))
-    (when enabled
+	result)
+    (when (epoxide-node-get-inputs-as-string (epoxide-node-read-inputs))
       (setq result (epoxide-shell-command-to-string host "ifconfig"))
       (when (equal check nil)
 	(setq check nil))
       (when check
-	(let ((check-result
-	       (mapconcat 'identity
-			  (epoxide-ifconfig-check-interfaces excludes result)
-			  "\n\n")))
-	  (if (> (length check-result) 0)
-	      (setq result (concat check-result "\n\n"))
-	    (epoxide-write-node-output result negative-output))
-	  (setq result check-result)))
+      	(let ((check-result
+	       (concat
+		(epoxide-ifconfig-check-interfaces result excludes)
+		"\n\n")))
+      	  (if (> (length check-result) 0)
+      	      (setq result (concat check-result "\n\n"))
+      	    (epoxide-write-node-output result negative-output))
+      	  (setq result check-result)))
       (epoxide-write-node-output result output))))
 
-(defun epoxide-ifconfig-check-interfaces (interfaces-to-exclude text)
+(defun epoxide-ifconfig-check-interfaces (text &rest interfaces-to-exclude)
   "Check interfaces whether they have a valid configuration.
-Go through each interfaces excluding INTERFACES-TO-EXCLUDE and
-check each of them.  TEXT holds the data descibing each
-interfaces."
-  (when (stringp interfaces-to-exclude)
-    (setq interfaces-to-exclude
-	  (split-string interfaces-to-exclude "[ \f\t\n\r\v]+"
-			t "[ \f\t\n\r\v]+")))
+
+Go through TEXT that describes each interfaces excluding
+INTERFACES-TO-EXCLUDE and check each of them."
+  (when (listp (nth 0 interfaces-to-exclude))
+    (setq interfaces-to-exclude (nth 0 interfaces-to-exclude)))
   (let ((interfaces (split-string text "\n\n"))
 	ret)
     (dolist (i interfaces)
       (unless (member (car (split-string i " ")) interfaces-to-exclude)
 	(when (epoxide-ifconfig--check-interface i)
 	  (setq ret (cons i ret)))))
-    (nreverse (delq nil ret))))
+    (mapconcat 'identity (nreverse (delq nil ret)) "\n\n")))
 
 (defun epoxide-ifconfig--check-interface (interface)
   "Check a single interface configuration contained in INTERFACE."
@@ -126,6 +115,7 @@ interfaces."
 TYPE specifies which direction should be checked.  It has to be
 either rx or tx.  Return t when the number of packets is greater
 than the number of errors, dropped or overruns."
+  ;; Jump to the specific line of the ifconfig output.
   (let* ((exp (concat type " packets:"))
 	 (x-beg (string-match exp interface))
   	 (x (if x-beg
@@ -137,17 +127,25 @@ than the number of errors, dropped or overruns."
   	 packets failures)
     (when x
       (setq packets (car (split-string x " ")))
-      (setq x (cadr (split-string x (concat packets " "))))
+      (setq x (substring x (1+ (length packets))))
       (setq packets (string-to-number packets))
+      ;; Walk through the read line and collect error, drop and
+      ;; overrun occurrences by constantily shortening the read string.
       (dolist (p parameters)
       	(let ((failure (cadr (split-string x p))))
       	  (unless (equal failure x)
+	    ;; Collect the occurrence of failure p.
       	    (setq failure (car (split-string failure " ")))
-	    (setq x (cadr (split-string x (concat p failure " "))))
+	    ;; Remove the currently processed failure counter from the
+	    ;; read line.
+	    (setq x (substring x (length failure)))
       	    (when (< 0 (length failure))
+	      ;; Keep failure counter when it has data.
       	      (setq failures (cons failure failures))))))
       (dolist (f failures)
     	(when (<= packets (string-to-number f))
+	  ;; Return nil when one of the counters signals that all
+	  ;; packets had some problems.
     	  (setq ret nil))))
     ret))
 

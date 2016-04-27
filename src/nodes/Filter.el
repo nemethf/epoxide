@@ -1,6 +1,6 @@
 ;;; Filter.el --- EPOXIDE Filter node definition file
 
-;; Copyright (C) 2015      István Pelle
+;; Copyright (C) 2015-2016 István Pelle
 ;; Copyright (C) 2015      Tamás Lévai
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -25,7 +25,6 @@
 (eval-when-compile
   (defvar epoxide-node-name)
   (defvar epoxide-node-class)
-  (defvar epoxide-input-marker)
   (defvar epoxide-node-config-list)
   (defvar epoxide-node-inputs)
   (defvar epoxide-node-outputs))
@@ -45,36 +44,26 @@
   '(((doc-string . "lines that match the criterion are marked"))))
 
 (defun epoxide-filter-init ()
-  "Init filter's input marker"
-  (make-local-variable 'epoxide-input-marker)
-  (setq-local epoxide-input-marker 1) )
+  "Dummy function."
+  nil)
 
 (defun epoxide-filter-exec ()
-  "Emphasize lines matching regular expression with italic font"
-  (let ((marker epoxide-input-marker)
-	(name1 (epoxide-tsg-create-node-buffer-name
-		epoxide-node-name
-		epoxide-node-class))
-	(regexp1 (nth 0 epoxide-node-config-list))
-	(input1 (nth 0 epoxide-node-inputs))
-	(output1 (nth 0 epoxide-node-outputs))
-	(destructive1 (nth 1 epoxide-node-config-list))
-        line)
-    (with-current-buffer input1
-      (save-excursion
-	(goto-char marker)
-	(while (< marker (point-max))
-	  (setq line (thing-at-point 'line))
-	  (if (string-match regexp1 line)
-	      (epoxide-write-node-output (propertize line 'face 'italic)
-					 output1)
-	    (when (null destructive1)
-	      (epoxide-write-node-output line output1)))
-	  (forward-line)
-	  (let ((in-pos (point)))
-	    (setq marker (point))
-	    (with-current-buffer name1
-	      (setq-local epoxide-input-marker in-pos))))))))
+  "Emphasize lines matching regular expression with italic font."
+  (let* ((input (car (epoxide-node-get-inputs-as-list
+		      (epoxide-node-read-inputs))))
+	 (input (if input
+		    (split-string input "\n")))
+	(regexp (nth 0 epoxide-node-config-list))
+	(output (nth 0 epoxide-node-outputs))
+	(destructive (nth 1 epoxide-node-config-list)))
+    (while input
+      (if (string-match regexp (car input))
+	  (epoxide-write-node-output (propertize (concat (car input) "\n")
+						 'face 'italic)
+				     output)
+	(unless destructive
+	  (epoxide-write-node-output (concat (car input) "\n") output)))
+      (setq input (cdr input)))))
 
 (defun epoxide-filter-stop ()
   "Dummy function."

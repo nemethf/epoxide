@@ -1,6 +1,6 @@
 ;;; Table-view.el --- EPOXIDE Table view node definition file
 
-;; Copyright (C) 2014-2015 István Pelle
+;; Copyright (C) 2014-2016 István Pelle
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published
@@ -38,7 +38,6 @@
 (require 'epoxide)
 
 (eval-when-compile
-  (defvar epoxide-input-markers)
   (defvar epoxide-node-inputs)
   (defvar epoxide-table-view-header)
   (defvar epoxide-table-view-header-line)
@@ -99,11 +98,6 @@
 
 (defun epoxide-table-view-init ()
   "Initialize buffer-local variables."
-  (set (make-local-variable 'epoxide-input-markers) nil)
-  (dolist (input (reverse epoxide-node-inputs))
-    (setq-local epoxide-input-markers
-		(cons `((marker-pos . 1) (buffer . ,input))
-		      epoxide-input-markers)))
   (set (make-local-variable 'epoxide-table-view-header) nil)
   (set (make-local-variable 'epoxide-table-view-header-line) "")
   (set (make-local-variable 'epoxide-table-view-default-header-format)
@@ -158,40 +152,9 @@ NEW-ORDER is a list of header item names."
 (defun epoxide-table-view-exec ()
   "Read the inputs and display them in a table."
   (let ((window (get-buffer-window))
-	new-markers input name table-line table-lines to-be-displayed tmp-line)
-    ;; Take care of input changes.
-    (unless (equal (sort (copy-sequence epoxide-node-inputs) #'string-lessp)
-    		   (sort (copy-sequence (mapcar (lambda (x)
-    						  (cdr (assoc 'buffer x)))
-    						epoxide-input-markers))
-			 #'string-lessp))
-      (let ((buffers-with-marker (copy-sequence (mapcar (lambda (x)
-    						  (cdr (assoc 'buffer x)))
-    						epoxide-input-markers)))
-    	    tmp-input-markers)
-    	(dolist (input epoxide-node-inputs)
-    	  (if (member input buffers-with-marker)
-    	      (dolist (input-marker epoxide-input-markers)
-    		(when (equal input (cdr (assoc 'buffer epoxide-input-markers)))
-    		  (setq tmp-input-markers (cons input-marker
-    						tmp-input-markers))))
-    	    (with-current-buffer input
-    	      (setq tmp-input-markers (cons `((marker-pos . ,(point-max))
-    					      (buffer . ,(buffer-name)))
-					    tmp-input-markers)))))
-    	(setq-local epoxide-input-markers (nreverse tmp-input-markers))))
-    ;; Create an input string from all the available inputs.
-    (dolist (marker (reverse epoxide-input-markers))
-      (with-current-buffer (cdr (assoc 'buffer marker))
-    	(when (and window (null epoxide-table-view-paused))
-    	  (when (< (cdr (assoc 'marker-pos marker)) (point-max))
-    	    (setq input (concat (buffer-substring-no-properties
-    				 (cdr (assoc 'marker-pos marker)) (point-max))
-    				input))))
-    	(setq new-markers (cons `((marker-pos . ,(point-max))
-				  (buffer . ,(buffer-name)))
-				new-markers))))
-    (setq-local epoxide-input-markers (nreverse new-markers))
+	(input (epoxide-node-get-inputs-as-string
+		(epoxide-node-read-inputs)))
+	name table-line table-lines to-be-displayed tmp-line)
     ;; Process this input.
     (when (and window input (null epoxide-table-view-paused))
       (dolist (line (split-string input "\n"))
